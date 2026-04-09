@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 - `src/td_flow/`: main package. Core files are `model.py`, `module.py`, `data.py`, `planner.py`, and `train.py`.
-- `tests/`: `unittest` smoke tests for paths, ODE behavior, and planner interfaces.
+- `tests/`: `unittest` smoke tests for data loading, model architecture, training entrypoints, paths, ODE behavior, and planner interfaces.
 - `doc/`: paper, implementation plan, and backbone notes.
 - `README.md`: setup, training commands, and the `tyro` config tutorial.
 
@@ -26,6 +26,14 @@
   ```bash
   uv run python -m td_flow.train --help
   ```
+- Run a checkpointed smoke train:
+  ```bash
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.max-steps 1 --train.run-name smoke
+  ```
+- Run validate-only from a checkpoint:
+  ```bash
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-mode validate --train.resume-ckpt-path outputs/smoke/checkpoints/last.ckpt
+  ```
 
 ## Coding Style & Naming Conventions
 
@@ -43,6 +51,7 @@
 - Add focused tests in `tests/test_<area>.py`.
 - Prioritize shape, interface, and smoke coverage before long training runs.
 - New planner or dataset code should include at least one tensor-shape assertion test.
+- For training-loop changes, cover checkpoint, resume, or validate-only behavior in `tests/test_train.py` when possible.
 
 ## Commit & Pull Request Guidelines
 
@@ -59,4 +68,7 @@
 - Use `uv` and the repo-local `.venv`; do not rely on the base environment.
 - Seed `pip` into the virtualenv, because `stable_pretraining` calls `python -m pip freeze` during environment dumps.
 - Training config is nested under `--data.*`, `--train.*`, and `--backbone.*` because the entrypoint uses `tyro`.
+- Run artifacts are written under `--train.output-dir/--train.run-name`, including `project_config.json`, CSV logs, checkpoints, and `eval_metrics.json`.
+- CSV logging is enabled by default; W&B is optional through `--train.use-wandb`.
+- Checkpointing is enabled by default; resume and validate-only runs use `--train.resume-ckpt-path`.
 - `.venv/`, `.pyc`, `__pycache__/`, and generated environment dumps should remain untracked.
