@@ -137,12 +137,18 @@ def build_td2_ogbench_dataset(config: DataConfig) -> OGBenchNPZDataset:
     import ogbench
 
     dataset_dir = config.cache_dir or "/home/haizhou/.ogbench/data"
-    train_dataset, _ = ogbench.make_env_and_datasets(
+    train_dataset, val_dataset = ogbench.make_env_and_datasets(
         config.dataset_name,
         dataset_dir=dataset_dir,
         dataset_only=True,
     )
-    return OGBenchNPZDataset(train_dataset)
+    if config.split == "train":
+        dataset = train_dataset
+    elif config.split == "val":
+        dataset = val_dataset
+    else:
+        raise ValueError("OGBench split must be one of: train, val")
+    return OGBenchNPZDataset(dataset)
 
 
 def build_td2_dataloader(config: DataConfig, *, shuffle: bool = True) -> DataLoader:

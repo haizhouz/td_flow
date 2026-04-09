@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from functools import partial
 from types import MethodType
+from typing import Any
 
 import torch
 import stable_pretraining as spt
@@ -18,6 +19,88 @@ def td2_cfm_forward(self: spt.Module, batch: dict, stage: str) -> dict:
 def td2_cfm_on_before_zero_grad(self: spt.Module, optimizer) -> None:
     del optimizer
     self.td2_cfm.update_targets()
+
+
+def _extract_scalar_metrics(state: dict[str, Any]) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        if isinstance(value, torch.Tensor) and value.numel() == 1:
+            metrics[key] = value.detach()
+    return metrics
+
+
+def _log_metrics(
+    module: spt.Module,
+    state: dict[str, Any] | None,
+    *,
+    prefix: str,
+    batch_size: int,
+    on_step: bool,
+    on_epoch: bool,
+) -> None:
+    if not isinstance(state, dict):
+        return
+    metrics = _extract_scalar_metrics(state)
+    if not metrics:
+        return
+
+    for key, value in metrics.items():
+        module.log(
+            f"{prefix}/{key}",
+            value,
+            on_step=on_step,
+            on_epoch=on_epoch,
+            prog_bar=key == "loss",
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+        if key == "loss":
+            module.log(
+                f"{prefix}_loss",
+                value,
+                on_step=on_step,
+                on_epoch=on_epoch,
+                prog_bar=False,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+
+
+def td2_cfm_on_train_batch_end(
+    self: spt.Module,
+    outputs,
+    batch,
+    batch_idx: int,
+) -> None:
+    del batch_idx
+    batch_size = int(batch["obs"].shape[0]) if isinstance(batch, dict) and "obs" in batch else 1
+    _log_metrics(
+        self,
+        outputs,
+        prefix="train",
+        batch_size=batch_size,
+        on_step=True,
+        on_epoch=True,
+    )
+
+
+def td2_cfm_on_validation_batch_end(
+    self: spt.Module,
+    outputs,
+    batch,
+    batch_idx: int,
+    dataloader_idx: int = 0,
+) -> None:
+    del batch_idx, dataloader_idx
+    batch_size = int(batch["obs"].shape[0]) if isinstance(batch, dict) and "obs" in batch else 1
+    _log_metrics(
+        self,
+        outputs,
+        prefix="val",
+        batch_size=batch_size,
+        on_step=False,
+        on_epoch=True,
+    )
 
 
 def build_training_module(
@@ -58,4 +141,6 @@ def build_training_module(
         optim=optim_config,
     )
     module.on_before_zero_grad = MethodType(td2_cfm_on_before_zero_grad, module)
+    module.on_train_batch_end = MethodType(td2_cfm_on_train_batch_end, module)
+    module.on_validation_batch_end = MethodType(td2_cfm_on_validation_batch_end, module)
     return module

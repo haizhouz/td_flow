@@ -40,6 +40,7 @@ class BackboneConfig:
 class DataConfig:
     dataset_name: str
     backend: str = "stablewm_hdf5"
+    split: str = "train"
     observation_key: str = "state"
     action_key: str = "action"
     goal_key: str | None = None
@@ -84,6 +85,7 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
+    run_mode: str = "fit"
     train_semantics: str = "paper"
     lr: float = 1e-4
     weight_decay: float | None = None
@@ -99,7 +101,16 @@ class TrainConfig:
     precision: str = "32-true"
     log_every_n_steps: int = 10
     seed: int = 0
-    enable_checkpointing: bool = False
+    output_dir: str = "outputs"
+    run_name: str | None = None
+    use_csv_logger: bool = True
+    enable_checkpointing: bool = True
+    checkpoint_monitor: str = "val_loss"
+    checkpoint_mode: str = "min"
+    checkpoint_save_top_k: int = 1
+    checkpoint_every_n_train_steps: int = 10_000
+    checkpoint_save_last: bool = True
+    resume_ckpt_path: str | None = None
     limit_train_batches: int | float | None = None
     limit_val_batches: int | float | None = 0
     use_wandb: bool = False

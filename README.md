@@ -32,10 +32,45 @@ uv run python -m td_flow.train \
   --data.cache-dir /home/haizhou/.ogbench/data \
   --data.batch-size 64 \
   --data.num-workers 0 \
+  --train.output-dir outputs \
+  --train.run-name cube-single-smoke \
   --train.max-steps 1 \
   --train.limit-train-batches 1 \
   --train.limit-val-batches 1
 ```
+
+This writes:
+
+- `outputs/<run_name>/project_config.json`
+- CSV logs under `outputs/<run_name>/csv/`
+- checkpoints under `outputs/<run_name>/checkpoints/`
+
+Resume a run from the latest checkpoint:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.cache-dir /home/haizhou/.ogbench/data \
+  --train.output-dir outputs \
+  --train.run-name cube-single-smoke \
+  --train.resume-ckpt-path outputs/cube-single-smoke/checkpoints/last.ckpt
+```
+
+Run checkpointed validation only:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.cache-dir /home/haizhou/.ogbench/data \
+  --train.run-mode validate \
+  --train.output-dir outputs \
+  --train.run-name cube-single-smoke \
+  --train.resume-ckpt-path outputs/cube-single-smoke/checkpoints/last.ckpt
+```
+
+For OGBench, validate mode uses the dataset's `val` split automatically and writes `eval_metrics.json` into the run directory.
 
 ## Config Tutorial
 
@@ -43,6 +78,7 @@ uv run python -m td_flow.train \
 
 - `--data.*` controls dataset loading and batch construction.
 - `--train.*` controls Lightning trainer settings and W&B logging.
+- `--train.*` also controls CSV logging, checkpointing, resume, and validate-only runs.
 - `--backbone.*` controls the encoder backbone used to build the TD²-CFM model.
 
 Examples:
@@ -55,6 +91,9 @@ Examples:
 --data.observation-key state
 --train.use-wandb
 --train.wandb-project td_flow
+--train.output-dir outputs
+--train.run-name cube-single-paper
+--train.resume-ckpt-path outputs/cube-single-paper/checkpoints/last.ckpt
 --backbone.kind mlp
 --backbone.hidden-dims 256 256
 ```
@@ -82,6 +121,11 @@ Training defaults now follow paper-style step semantics:
 - `--train.max-steps` is the primary training horizon
 - `--train.max-epochs` is only for overriding Lightning behavior during debugging
 - `--train.devices` defaults to `auto`, so Lightning uses the visible devices unless you override it
+- `--train.run-mode fit|validate` selects training or checkpointed validation
+- `--train.use-csv-logger` defaults to `True`
+- `--train.enable-checkpointing` defaults to `True`
+- `--train.checkpoint-monitor` defaults to `val_loss`
+- `--train.resume-ckpt-path` resumes `fit` or loads weights for `validate`
 
 When the corresponding field is left unset, paper defaults are resolved by `policy_mode`:
 
