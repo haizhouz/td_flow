@@ -114,7 +114,9 @@ Current repo options:
 
 - single-policy width: `512`
 - multi-policy width: `1024`
-- time embedding dim: `256`
+- conditional encoder MLP: `(512, 512, 512)` or `(1024, 1024, 1024)`
+- time embedding MLP: `(256, 256)`
+- blocks per stage: `1`
 
 ### Callbacks
 

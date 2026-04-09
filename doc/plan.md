@@ -261,6 +261,10 @@ Implement the encoder + TD-Flow head:
 - vector-field network
 - target-network copy / EMA update
 
+Current status:
+
+- `network_variant=paper` follows Table 5 for the conditional encoder, time-embedding MLP, and U-Net stage widths
+
 Deliverables:
 
 - model module

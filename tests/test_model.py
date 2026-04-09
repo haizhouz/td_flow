@@ -100,8 +100,12 @@ class ModelTest(unittest.TestCase):
         multi_linear_layers = [
             module for module in multi_policy.context_encoder.network if isinstance(module, nn.Linear)
         ]
-        self.assertEqual(len(single_linear_layers), 2)
-        self.assertEqual(len(multi_linear_layers), 2)
+        time_linear_layers = [
+            module for module in single_policy.vector_field.time_encoder if isinstance(module, nn.Linear)
+        ]
+        self.assertEqual(len(single_linear_layers), 3)
+        self.assertEqual(len(multi_linear_layers), 3)
+        self.assertEqual(len(time_linear_layers), 2)
 
     def test_paper_train_semantics_uses_step_interval(self) -> None:
         module = build_training_module(

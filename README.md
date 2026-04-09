@@ -64,7 +64,10 @@ The model shape fields are inferred from the first batch, so you do not set `obs
 `--network-variant` selects the flow network family:
 
 - `repo`: the current repo default FiLM residual U-Net approximation
-- `paper`: the paper-width U-Net MLP with Table 5 widths (`512` single-policy, `1024` multi-policy)
+- `paper`: the Table 5 architecture path
+  - conditional encoder MLP: `(512, 512, 512)` single-policy or `(1024, 1024, 1024)` multi-policy
+  - time embedding MLP: `(256, 256)`
+  - U-Net block widths: `(512, 512, 512)` single-policy or `(1024, 1024, 1024)` multi-policy
 
 `--observation-encoder` controls how observations are represented before the flow model:
 

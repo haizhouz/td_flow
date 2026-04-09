@@ -77,7 +77,9 @@ The current code also exposes two network families:
 - `network_variant=paper`: the paper-width U-Net MLP path using Table 5 widths
   - single-policy width: $512$
   - multi-policy width: $1024$
-  - time embedding width: $256$
+  - conditional encoder MLP: $(512, 512, 512)$ or $(1024, 1024, 1024)$
+  - time embedding MLP: $(256, 256)$
+  - blocks per stage: $1$
 
 ## Target Networks
 
@@ -225,4 +227,4 @@ In the current code, the default rollout source is sampled from $\mathcal{N}(0, 
 
 ## Important Scope Note
 
-This document is faithful to the current codebase, not a claim that every detail exactly matches the full paper implementation. The strongest paper-supported distinction is between single-policy inputs $s,a$ and multi-policy inputs $s,a,z$. In this document, $z$ is reserved for that paper-side task embedding, while $s = e_\theta(\mathrm{obs})$ denotes the repo's encoded state. The repo's optional identity observation path for flat states is an engineering approximation, not a proven verbatim paper detail. The `network_variant=paper` option aligns widths and time embedding more closely with Table 5, but should still be read as a paper-aligned implementation mode rather than a verified copy of the authors' private code.
+This document is faithful to the current codebase, not a claim that every detail exactly matches the full paper implementation. The strongest paper-supported distinction is between single-policy inputs $s,a$ and multi-policy inputs $s,a,z$. In this document, $z$ is reserved for that paper-side task embedding, while $s = e_\theta(\mathrm{obs})$ denotes the repo's encoded state. The repo's optional identity observation path for flat states is an engineering approximation, not a proven verbatim paper detail. The `network_variant=paper` option now follows Table 5 literally for the conditional encoder, time-embedding MLP, and stage widths, but should still be read as a paper-aligned implementation mode rather than a verified copy of the authors' private code.

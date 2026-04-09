@@ -148,7 +148,7 @@ class PaperContextEncoder(ContextEncoder):
             latent_dim=latent_dim,
             action_dim=action_dim,
             policy_embedding_dim=policy_embedding_dim,
-            hidden_dims=(hidden_dim,),
+            hidden_dims=(hidden_dim, hidden_dim),
             context_dim=hidden_dim,
         )
 
@@ -208,7 +208,7 @@ class VectorField(nn.Module):
         self.raw_time_embedding = SinusoidalTimeEmbedding(time_embed_dim)
         self.time_encoder = _make_mlp(
             time_embed_dim,
-            (time_embed_dim, time_embed_dim),
+            (time_embed_dim,),
             time_embed_dim,
         )
         self.conditioning_dim = context_dim + time_embed_dim
