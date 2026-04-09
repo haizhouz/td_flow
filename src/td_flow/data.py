@@ -15,10 +15,21 @@ def _as_float_tensor(value: object) -> torch.Tensor:
 
 
 class OGBenchNPZDataset(Dataset):
-    def __init__(self, dataset: dict[str, object]) -> None:
+    def __init__(
+        self,
+        dataset: dict[str, object],
+        *,
+        policy_embeddings: torch.Tensor | None = None,
+    ) -> None:
         self.observations = _as_float_tensor(dataset["observations"])
         self.actions = _as_float_tensor(dataset["actions"])
         self.next_observations = _as_float_tensor(dataset["next_observations"])
+        self.policy_embeddings = policy_embeddings
+        terminals = dataset.get("terminals")
+        if terminals is None:
+            self.terminals = torch.zeros(self.actions.shape[0], dtype=torch.bool)
+        else:
+            self.terminals = _as_float_tensor(terminals).bool()
 
     def __len__(self) -> int:
         return int(self.observations.shape[0])
@@ -27,12 +38,21 @@ class OGBenchNPZDataset(Dataset):
         obs = self.observations[index]
         next_obs = self.next_observations[index]
         action = self.actions[index]
+        if index + 1 < len(self.actions) and not bool(self.terminals[index]):
+            next_action = self.actions[index + 1]
+        else:
+            next_action = torch.zeros_like(action)
         return {
             "obs": obs,
             "next_obs": next_obs,
             "action": action,
-            "next_action": torch.zeros_like(action),
+            "next_action": next_action,
             "goal": next_obs,
+            **(
+                {"policy_embedding": self.policy_embeddings[index]}
+                if self.policy_embeddings is not None
+                else {}
+            ),
         }
 
 
@@ -44,11 +64,13 @@ class TD2CFMDataset(Dataset):
         observation_key: str = "state",
         action_key: str = "action",
         goal_key: str | None = None,
+        policy_embedding_key: str | None = None,
     ) -> None:
         self.dataset = dataset
         self.observation_key = observation_key
         self.action_key = action_key
         self.goal_key = goal_key
+        self.policy_embedding_key = policy_embedding_key
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -82,6 +104,12 @@ class TD2CFMDataset(Dataset):
         else:
             output["goal"] = observations[-1]
 
+        if self.policy_embedding_key is not None and self.policy_embedding_key in sample:
+            policy_embedding = _as_float_tensor(sample[self.policy_embedding_key])
+            output["policy_embedding"] = (
+                policy_embedding[-1] if policy_embedding.ndim > 1 else policy_embedding
+            )
+
         return output
 
 
@@ -101,6 +129,7 @@ def build_td2_hdf5_dataset(config: DataConfig) -> TD2CFMDataset:
         observation_key=base_config.observation_key,
         action_key=base_config.action_key,
         goal_key=base_config.goal_key,
+        policy_embedding_key=base_config.policy_embedding_key,
     )
 
 
@@ -133,7 +162,9 @@ def build_td2_dataloader(config: DataConfig, *, shuffle: bool = True) -> DataLoa
     )
 
 
-def infer_shapes(sample: dict[str, torch.Tensor]) -> tuple[tuple[int, ...], int]:
+def infer_shapes(sample: dict[str, torch.Tensor]) -> tuple[tuple[int, ...], int, int]:
     observation_shape = tuple(sample["obs"].shape[1:])
     action_dim = int(sample["action"][0].numel())
-    return observation_shape, action_dim
+    policy_embedding = sample.get("policy_embedding")
+    policy_embedding_dim = 0 if policy_embedding is None else int(policy_embedding[0].numel())
+    return observation_shape, action_dim, policy_embedding_dim

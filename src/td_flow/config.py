@@ -4,6 +4,30 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+def resolve_paper_weight_decay(policy_mode: str) -> float:
+    if policy_mode == "single_policy":
+        return 1e-3
+    if policy_mode == "multi_policy":
+        return 1e-2
+    raise ValueError("policy_mode must be one of: single_policy, multi_policy")
+
+
+def resolve_paper_max_steps(policy_mode: str) -> int:
+    if policy_mode == "single_policy":
+        return 3_000_000
+    if policy_mode == "multi_policy":
+        return 8_000_000
+    raise ValueError("policy_mode must be one of: single_policy, multi_policy")
+
+
+def resolve_paper_polyak(policy_mode: str) -> float:
+    if policy_mode == "single_policy":
+        return 0.999
+    if policy_mode == "multi_policy":
+        return 0.9999
+    raise ValueError("policy_mode must be one of: single_policy, multi_policy")
+
+
 @dataclass
 class BackboneConfig:
     kind: str = "mlp"
@@ -19,7 +43,8 @@ class DataConfig:
     observation_key: str = "state"
     action_key: str = "action"
     goal_key: str | None = None
-    batch_size: int = 64
+    policy_embedding_key: str | None = None
+    batch_size: int = 1024
     num_workers: int = 4
     frameskip: int = 1
     num_steps: int = 2
@@ -32,6 +57,8 @@ class DataConfig:
         keys.add(self.action_key)
         if self.goal_key is not None:
             keys.add(self.goal_key)
+        if self.policy_embedding_key is not None:
+            keys.add(self.policy_embedding_key)
         return sorted(keys)
 
 
@@ -40,31 +67,41 @@ class ModelConfig:
     observation_shape: tuple[int, ...]
     action_dim: int
     backbone: BackboneConfig = field(default_factory=BackboneConfig)
+    observation_encoder: str = "auto"
+    network_variant: str = "repo"
     latent_dim: int = 128
+    policy_embedding_dim: int = 0
     context_dim: int = 128
     context_hidden_dims: tuple[int, ...] = (256, 256)
     vector_field_hidden_dims: tuple[int, ...] = (256, 256)
-    time_embed_dim: int = 64
+    time_embed_dim: int = 256
     gamma: float = 0.99
-    polyak: float = 0.995
+    polyak: float | None = None
     ode_steps: int = 10
     time_eps: float = 1e-4
+    policy_mode: str = "single_policy"
 
 
 @dataclass
 class TrainConfig:
-    lr: float = 3e-4
-    weight_decay: float = 1e-4
-    scheduler: str = "CosineAnnealingLR"
-    max_epochs: int = 50
+    train_semantics: str = "paper"
+    lr: float = 1e-4
+    weight_decay: float | None = None
+    scheduler: str | None = None
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    adam_eps: float = 1e-4
+    max_steps: int | None = None
+    max_epochs: int | None = None
+    val_check_interval: int | float | None = None
     accelerator: str = "auto"
-    devices: int | str = 1
+    devices: int | str = "auto"
     precision: str = "32-true"
     log_every_n_steps: int = 10
     seed: int = 0
     enable_checkpointing: bool = False
     limit_train_batches: int | float | None = None
-    limit_val_batches: int | float | None = None
+    limit_val_batches: int | float | None = 0
     use_wandb: bool = False
     wandb_project: str = "td_flow"
     wandb_name: str | None = None
@@ -105,3 +142,7 @@ class TrainEntryConfig:
     data: DataConfig
     train: TrainConfig = field(default_factory=TrainConfig)
     backbone: BackboneConfig = field(default_factory=BackboneConfig)
+    policy_mode: str = "single_policy"
+    observation_encoder: str = "auto"
+    network_variant: str = "repo"
+    policy_embedding_dim: int = 0

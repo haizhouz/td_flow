@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
 
 import torch
 import torch.nn as nn
 import stable_pretraining as spt
 
-from .config import BackboneConfig, ModelConfig
+from .config import BackboneConfig, ModelConfig, resolve_paper_polyak
 from .ode import midpoint_integrate
 from .paths import sample_linear_probability_path, sample_source, sample_time
 from .target import clone_as_target, ema_update
+
+PAPER_SINGLE_WIDTH = 512
+PAPER_MULTI_WIDTH = 1024
 
 
 def _make_mlp(
@@ -48,6 +50,11 @@ class SinusoidalTimeEmbedding(nn.Module):
                 [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
             )
         return embedding
+
+
+class IdentityObservationEncoder(nn.Module):
+    def forward(self, observation: torch.Tensor) -> torch.Tensor:
+        return observation.float().reshape(observation.shape[0], -1)
 
 
 class StableBackboneEncoder(nn.Module):
@@ -104,19 +111,85 @@ class ContextEncoder(nn.Module):
         *,
         latent_dim: int,
         action_dim: int,
+        policy_embedding_dim: int,
         hidden_dims: tuple[int, ...],
         context_dim: int,
     ) -> None:
         super().__init__()
         self.network = _make_mlp(
-            latent_dim + action_dim,
+            latent_dim + action_dim + policy_embedding_dim,
             hidden_dims,
             context_dim,
         )
 
-    def forward(self, state_latent: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        state_latent: torch.Tensor,
+        action: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         flat_action = action.reshape(action.shape[0], -1).float()
-        return self.network(torch.cat([state_latent, flat_action], dim=-1))
+        inputs = [state_latent, flat_action]
+        if policy_embedding is not None:
+            inputs.append(policy_embedding.reshape(policy_embedding.shape[0], -1).float())
+        return self.network(torch.cat(inputs, dim=-1))
+
+
+class PaperContextEncoder(ContextEncoder):
+    def __init__(
+        self,
+        *,
+        latent_dim: int,
+        action_dim: int,
+        policy_embedding_dim: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__(
+            latent_dim=latent_dim,
+            action_dim=action_dim,
+            policy_embedding_dim=policy_embedding_dim,
+            hidden_dims=(hidden_dim,),
+            context_dim=hidden_dim,
+        )
+
+
+class FiLMResidualBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        output_dim: int,
+        conditioning_dim: int,
+    ) -> None:
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, output_dim)
+        self.output_proj = nn.Linear(output_dim, output_dim)
+        self.norm1 = nn.LayerNorm(output_dim, elementwise_affine=False)
+        self.norm2 = nn.LayerNorm(output_dim, elementwise_affine=False)
+        self.mod1 = nn.Linear(conditioning_dim, 2 * output_dim)
+        self.mod2 = nn.Linear(conditioning_dim, 2 * output_dim)
+        self.skip = nn.Identity() if input_dim == output_dim else nn.Linear(input_dim, output_dim)
+        self.activation = nn.Mish()
+
+    def _film(self, x: torch.Tensor, modulation: torch.Tensor) -> torch.Tensor:
+        scale, shift = modulation.chunk(2, dim=-1)
+        return x * (1.0 + scale) + shift
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        conditioning: torch.Tensor,
+    ) -> torch.Tensor:
+        residual = self.skip(x)
+        h = self.input_proj(x)
+        h = self.norm1(h)
+        h = self._film(h, self.mod1(conditioning))
+        h = self.activation(h)
+        h = self.output_proj(h)
+        h = self.norm2(h)
+        h = self._film(h, self.mod2(conditioning))
+        h = self.activation(h)
+        return residual + h
 
 
 class VectorField(nn.Module):
@@ -129,12 +202,47 @@ class VectorField(nn.Module):
         hidden_dims: tuple[int, ...],
     ) -> None:
         super().__init__()
-        self.time_embedding = SinusoidalTimeEmbedding(time_embed_dim)
-        self.network = _make_mlp(
-            latent_dim + context_dim + time_embed_dim,
-            hidden_dims,
-            latent_dim,
+        if len(hidden_dims) == 0:
+            raise ValueError("vector_field_hidden_dims must be non-empty")
+
+        self.raw_time_embedding = SinusoidalTimeEmbedding(time_embed_dim)
+        self.time_encoder = _make_mlp(
+            time_embed_dim,
+            (time_embed_dim, time_embed_dim),
+            time_embed_dim,
         )
+        self.conditioning_dim = context_dim + time_embed_dim
+        self.down_blocks = nn.ModuleList()
+
+        in_dim = latent_dim
+        for hidden_dim in hidden_dims:
+            self.down_blocks.append(
+                FiLMResidualBlock(
+                    input_dim=in_dim,
+                    output_dim=hidden_dim,
+                    conditioning_dim=self.conditioning_dim,
+                )
+            )
+            in_dim = hidden_dim
+
+        self.mid_block = FiLMResidualBlock(
+            input_dim=in_dim,
+            output_dim=in_dim,
+            conditioning_dim=self.conditioning_dim,
+        )
+
+        self.up_blocks = nn.ModuleList()
+        for skip_dim in reversed(hidden_dims[:-1]):
+            self.up_blocks.append(
+                FiLMResidualBlock(
+                    input_dim=in_dim + skip_dim,
+                    output_dim=skip_dim,
+                    conditioning_dim=self.conditioning_dim,
+                )
+            )
+            in_dim = skip_dim
+
+        self.final = nn.Linear(in_dim, latent_dim)
 
     def forward(
         self,
@@ -142,31 +250,109 @@ class VectorField(nn.Module):
         t: torch.Tensor,
         context: torch.Tensor,
     ) -> torch.Tensor:
-        time_features = self.time_embedding(t.float())
-        return self.network(torch.cat([x_t, context, time_features], dim=-1))
+        time_features = self.time_encoder(self.raw_time_embedding(t.float()))
+        conditioning = torch.cat([context, time_features], dim=-1)
+
+        h = x_t
+        skips: list[torch.Tensor] = []
+        for index, block in enumerate(self.down_blocks):
+            h = block(h, conditioning)
+            if index < len(self.down_blocks) - 1:
+                skips.append(h)
+
+        h = self.mid_block(h, conditioning)
+
+        for block, skip in zip(self.up_blocks, reversed(skips)):
+            h = block(torch.cat([h, skip], dim=-1), conditioning)
+
+        return self.final(h)
+
+
+class PaperVectorField(VectorField):
+    def __init__(
+        self,
+        *,
+        latent_dim: int,
+        context_dim: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__(
+            latent_dim=latent_dim,
+            context_dim=context_dim,
+            time_embed_dim=256,
+            hidden_dims=(hidden_dim, hidden_dim, hidden_dim),
+        )
+
+
+def _resolve_paper_hidden_dim(policy_mode: str) -> int:
+    if policy_mode == "single_policy":
+        return PAPER_SINGLE_WIDTH
+    if policy_mode == "multi_policy":
+        return PAPER_MULTI_WIDTH
+    raise ValueError("policy_mode must be one of: single_policy, multi_policy")
 
 
 class TD2CFMModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.encoder = StableBackboneEncoder(
-            observation_shape=cfg.observation_shape,
-            cfg=cfg.backbone,
-            latent_dim=cfg.latent_dim,
+        encoder_mode = cfg.observation_encoder.lower()
+        if encoder_mode == "auto":
+            self.use_identity_encoder = cfg.policy_mode == "single_policy" and len(cfg.observation_shape) == 1
+        elif encoder_mode in {"identity", "no_encoder"}:
+            self.use_identity_encoder = True
+        elif encoder_mode == "learned":
+            self.use_identity_encoder = False
+        else:
+            raise ValueError(
+                "observation_encoder must be one of: auto, identity, no_encoder, learned"
+            )
+        self.network_variant = cfg.network_variant.lower()
+        if self.network_variant not in {"repo", "paper"}:
+            raise ValueError("network_variant must be one of: repo, paper")
+        self.target_polyak = (
+            cfg.polyak
+            if cfg.polyak is not None
+            else resolve_paper_polyak(cfg.policy_mode)
         )
-        self.context_encoder = ContextEncoder(
-            latent_dim=cfg.latent_dim,
-            action_dim=cfg.action_dim,
-            hidden_dims=cfg.context_hidden_dims,
-            context_dim=cfg.context_dim,
+
+        self.latent_dim = math.prod(cfg.observation_shape) if self.use_identity_encoder else cfg.latent_dim
+        self.encoder = (
+            IdentityObservationEncoder()
+            if self.use_identity_encoder
+            else StableBackboneEncoder(
+                observation_shape=cfg.observation_shape,
+                cfg=cfg.backbone,
+                latent_dim=self.latent_dim,
+            )
         )
-        self.vector_field = VectorField(
-            latent_dim=cfg.latent_dim,
-            context_dim=cfg.context_dim,
-            time_embed_dim=cfg.time_embed_dim,
-            hidden_dims=cfg.vector_field_hidden_dims,
-        )
+        if self.network_variant == "paper":
+            paper_hidden_dim = _resolve_paper_hidden_dim(cfg.policy_mode)
+            self.context_encoder = PaperContextEncoder(
+                latent_dim=self.latent_dim,
+                action_dim=cfg.action_dim,
+                policy_embedding_dim=cfg.policy_embedding_dim,
+                hidden_dim=paper_hidden_dim,
+            )
+            self.vector_field = PaperVectorField(
+                latent_dim=self.latent_dim,
+                context_dim=paper_hidden_dim,
+                hidden_dim=paper_hidden_dim,
+            )
+        else:
+            self.context_encoder = ContextEncoder(
+                latent_dim=self.latent_dim,
+                action_dim=cfg.action_dim,
+                policy_embedding_dim=cfg.policy_embedding_dim,
+                hidden_dims=cfg.context_hidden_dims,
+                context_dim=cfg.context_dim,
+            )
+            self.vector_field = VectorField(
+                latent_dim=self.latent_dim,
+                context_dim=cfg.context_dim,
+                time_embed_dim=cfg.time_embed_dim,
+                hidden_dims=cfg.vector_field_hidden_dims,
+            )
 
         self.target_encoder = clone_as_target(self.encoder)
         self.target_context_encoder = clone_as_target(self.context_encoder)
@@ -177,9 +363,9 @@ class TD2CFMModel(nn.Module):
         return next(self.parameters()).device
 
     def update_targets(self) -> None:
-        ema_update(self.target_encoder, self.encoder, self.cfg.polyak)
-        ema_update(self.target_context_encoder, self.context_encoder, self.cfg.polyak)
-        ema_update(self.target_vector_field, self.vector_field, self.cfg.polyak)
+        ema_update(self.target_encoder, self.encoder, self.target_polyak)
+        ema_update(self.target_context_encoder, self.context_encoder, self.target_polyak)
+        ema_update(self.target_vector_field, self.vector_field, self.target_polyak)
 
     def encode_observation(self, observation: torch.Tensor, *, use_target: bool = False) -> torch.Tensor:
         encoder = self.target_encoder if use_target else self.encoder
@@ -189,11 +375,16 @@ class TD2CFMModel(nn.Module):
         self,
         state_latent: torch.Tensor,
         action: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
         *,
         use_target: bool = False,
     ) -> torch.Tensor:
+        if self.cfg.policy_embedding_dim > 0 and policy_embedding is None:
+            raise ValueError(
+                "policy_embedding is required when policy_embedding_dim > 0."
+            )
         context_encoder = self.target_context_encoder if use_target else self.context_encoder
-        return context_encoder(state_latent, action)
+        return context_encoder(state_latent, action, policy_embedding)
 
     def compute_velocity(
         self,
@@ -201,10 +392,16 @@ class TD2CFMModel(nn.Module):
         t: torch.Tensor,
         state_latent: torch.Tensor,
         action: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
         *,
         use_target: bool = False,
     ) -> torch.Tensor:
-        context = self.encode_context(state_latent, action, use_target=use_target)
+        context = self.encode_context(
+            state_latent,
+            action,
+            policy_embedding,
+            use_target=use_target,
+        )
         vector_field = self.target_vector_field if use_target else self.vector_field
         return vector_field(x_t, t, context)
 
@@ -214,6 +411,7 @@ class TD2CFMModel(nn.Module):
         next_action: torch.Tensor,
         source: torch.Tensor,
         t: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         def vf(x_t: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
             return self.compute_velocity(
@@ -221,6 +419,7 @@ class TD2CFMModel(nn.Module):
                 tau,
                 next_latent,
                 next_action,
+                policy_embedding,
                 use_target=True,
             )
 
@@ -233,15 +432,16 @@ class TD2CFMModel(nn.Module):
         self,
         state_latent: torch.Tensor,
         action: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
         *,
         t_end: float = 1.0,
         use_target: bool = False,
         source: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if source is None:
-            source = torch.zeros(
+            source = sample_source(
                 state_latent.shape[0],
-                self.cfg.latent_dim,
+                self.latent_dim,
                 device=state_latent.device,
                 dtype=state_latent.dtype,
             )
@@ -252,16 +452,13 @@ class TD2CFMModel(nn.Module):
                 tau,
                 state_latent,
                 action,
+                policy_embedding,
                 use_target=use_target,
             )
 
         return midpoint_integrate(vf, source, t_end, steps=self.cfg.ode_steps)
 
     def compute_state(self, batch: dict[str, torch.Tensor], *, stage: str) -> dict[str, torch.Tensor]:
-        training = stage.startswith("train") and self.training
-        if training:
-            self.update_targets()
-
         obs = batch["obs"].to(self.device).float()
         action = batch["action"].to(self.device).float()
         next_obs = batch["next_obs"].to(self.device).float()
@@ -269,6 +466,9 @@ class TD2CFMModel(nn.Module):
         if next_action is None:
             next_action = torch.zeros_like(action)
         next_action = next_action.to(self.device).float()
+        policy_embedding = batch.get("policy_embedding")
+        if policy_embedding is not None:
+            policy_embedding = policy_embedding.to(self.device).float()
 
         state_latent = self.encode_observation(obs)
         next_latent_target = self.encode_observation(next_obs, use_target=True).detach()
@@ -281,7 +481,7 @@ class TD2CFMModel(nn.Module):
         )
         source = sample_source(
             obs.shape[0],
-            self.cfg.latent_dim,
+            self.latent_dim,
             device=self.device,
             dtype=state_latent.dtype,
         )
@@ -297,6 +497,7 @@ class TD2CFMModel(nn.Module):
             t,
             state_latent,
             action,
+            policy_embedding,
             use_target=False,
         )
 
@@ -305,12 +506,14 @@ class TD2CFMModel(nn.Module):
             next_action,
             source,
             t,
+            policy_embedding,
         )
         bootstrap_prediction = self.compute_velocity(
             bootstrap_xt,
             t,
             state_latent,
             action,
+            policy_embedding,
             use_target=False,
         )
 
@@ -326,4 +529,3 @@ class TD2CFMModel(nn.Module):
             "latent_norm": state_latent.norm(dim=-1).mean().detach(),
             "vf_norm": direct_prediction.norm(dim=-1).mean().detach(),
         }
-

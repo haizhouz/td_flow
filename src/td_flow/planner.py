@@ -24,6 +24,7 @@ class TD2CFMPlannerAdapter(nn.Module):
         *,
         observation_key: str = "pixels",
         goal_key: str = "goal",
+        policy_embedding_key: str | None = None,
         rollout_discount: float = 1.0,
         terminal_weight: float = 1.0,
     ) -> None:
@@ -31,6 +32,7 @@ class TD2CFMPlannerAdapter(nn.Module):
         self.model = model
         self.observation_key = observation_key
         self.goal_key = goal_key
+        self.policy_embedding_key = policy_embedding_key
         self.rollout_discount = rollout_discount
         self.terminal_weight = terminal_weight
 
@@ -42,11 +44,21 @@ class TD2CFMPlannerAdapter(nn.Module):
         current_obs = _ensure_tensor(info_dict[self.observation_key], self.device)
         goal_obs = _ensure_tensor(info_dict[self.goal_key], self.device)
         actions = _ensure_tensor(action_candidates, self.device)
+        policy_embedding = info_dict.get(self.policy_embedding_key) if self.policy_embedding_key else None
+        flat_policy_embedding = None
+        if policy_embedding is not None:
+            policy_embedding = _ensure_tensor(policy_embedding, self.device)
 
         batch_size, num_samples, horizon, action_dim = actions.shape
         flat_obs = current_obs.reshape(batch_size * num_samples, *current_obs.shape[2:])
         flat_goal = goal_obs.reshape(batch_size * num_samples, *goal_obs.shape[2:])
         flat_actions = actions.reshape(batch_size * num_samples, horizon, action_dim)
+        if policy_embedding is not None:
+            if policy_embedding.ndim == 2:
+                policy_embedding = policy_embedding.unsqueeze(1).expand(-1, num_samples, -1)
+            elif policy_embedding.ndim == 3 and policy_embedding.shape[1] == 1:
+                policy_embedding = policy_embedding.expand(-1, num_samples, -1)
+            flat_policy_embedding = policy_embedding.reshape(batch_size * num_samples, -1)
 
         with torch.no_grad():
             current_latent = self.model.encode_observation(flat_obs)
@@ -63,7 +75,7 @@ class TD2CFMPlannerAdapter(nn.Module):
                 current_latent = self.model.predict_next_latent(
                     current_latent,
                     flat_actions[:, step],
-                    source=torch.zeros_like(current_latent),
+                    flat_policy_embedding,
                 )
                 step_cost = torch.mean((current_latent - goal_latent) ** 2, dim=-1)
                 costs = costs + discount * step_cost
@@ -87,6 +99,7 @@ class TD2CFMPlanningPolicy(BasePolicy):
         config: PlanConfig,
         observation_key: str,
         goal_key: str,
+        policy_embedding_key: str | None,
         process: dict | None = None,
         transform: dict | None = None,
         **kwargs,
@@ -97,6 +110,7 @@ class TD2CFMPlanningPolicy(BasePolicy):
         self.cfg = config
         self.observation_key = observation_key
         self.goal_key = goal_key
+        self.policy_embedding_key = policy_embedding_key
         self.process = process or {}
         self.transform = transform or {}
         self._action_buffer: list[torch.Tensor] = []
@@ -125,6 +139,10 @@ class TD2CFMPlanningPolicy(BasePolicy):
         assert self.goal_key in info_dict, (
             f"'{self.goal_key}' must be provided in info_dict"
         )
+        if self.policy_embedding_key is not None:
+            assert self.policy_embedding_key in info_dict, (
+                f"'{self.policy_embedding_key}' must be provided in info_dict"
+            )
 
         info_dict = self._prepare_info(dict(info_dict))
 
@@ -153,12 +171,14 @@ def build_planning_policy(
     *,
     observation_key: str = "observation",
     goal_key: str = "target",
+    policy_embedding_key: str | None = None,
     device: str | torch.device = "cpu",
 ) -> TD2CFMPlanningPolicy:
     adapter = TD2CFMPlannerAdapter(
         model,
         observation_key=observation_key,
         goal_key=goal_key,
+        policy_embedding_key=policy_embedding_key,
         rollout_discount=planning_config.rollout_discount,
         terminal_weight=planning_config.terminal_weight,
     )
@@ -182,4 +202,5 @@ def build_planning_policy(
         ),
         observation_key=observation_key,
         goal_key=goal_key,
+        policy_embedding_key=policy_embedding_key,
     )

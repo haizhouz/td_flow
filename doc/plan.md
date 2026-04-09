@@ -9,6 +9,19 @@ Reproduce the paper’s proposed TD-Flow method from `doc/farebrother25a.pdf`, s
 
 This plan assumes the repo will become an integration project rather than a from-scratch standalone implementation. The scope is intentionally narrowed to the single strongest flow-matching variant in the paper instead of reproducing all ablations up front.
 
+## Current Status
+
+The repo now has a working TD$^2$-CFM scaffold with:
+
+- `tyro` configuration
+- `uv` environment management
+- OGBench state-space smoke coverage
+- optional `policy_embedding` input
+- `network_variant=paper` for the paper-width MLP U-Net path
+- paper-style step-based trainer semantics through `max_steps`
+
+What remains is paper-alignment cleanup and broader benchmark coverage, not first-pass scaffolding.
+
 ## What I Verified
 
 ### `stable_pretraining`
@@ -114,7 +127,7 @@ Build the TD-Flow encoder on `stable_pretraining.backbone`:
 - low-dimensional observations:
   - start with `stable_pretraining.backbone.MLP`
 
-The backbone output should be a latent state embedding `z`.
+The backbone output should be an encoded state, denoted `s` in the math notes.
 
 ### 3. TD-Flow model head
 
@@ -133,6 +146,9 @@ The paper details to preserve:
 - midpoint ODE sampling with 10 steps
 - target network with Polyak averaging
 - the `TD²-CFM` bootstrap target, which uses the previous vector field directly as the regression target
+- single-policy input `s, a`
+- multi-policy input `s, a, z` represented here as an optional `policy_embedding`
+- step-based training semantics rather than an epoch-first loop
 
 ### 4. Training wrapper
 
@@ -153,6 +169,12 @@ Then run it through:
 - `spt.data.DataModule`
 - `spt.Manager`
 - Lightning `Trainer`
+
+Current implementation note:
+
+- the trainer now defaults to paper-style step semantics via `max_steps`
+- validation is optional and disabled by default unless explicitly requested
+- `network_variant=paper` selects the paper-width architecture path
 
 ### 5. Planning-time adapter
 
@@ -308,9 +330,9 @@ Deliverables:
 
 Raw pixel-space TD-Flow would be expensive and unnecessary for the first working reproduction. The cleaner path is:
 
-- encode observation to latent `z`
-- run TD-Flow in latent space
-- use the latent predictor for planning cost estimation
+- encode observation `obs` to an encoded state `s`
+- run TD-Flow in that encoded-state space
+- use the encoded-state predictor for planning cost estimation
 
 This is also the natural point where `stable_pretraining` adds value.
 

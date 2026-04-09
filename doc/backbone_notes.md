@@ -40,7 +40,7 @@ Implication for this repo:
   - `action`
   - `next_obs`
   - optional `goal`
-  - optional `state`
+  - optional `policy_embedding`
   - optional masks / terminal flags
 
 ### Module contract
@@ -65,6 +65,11 @@ our custom forward should return at least:
 - `"loss_bootstrap"`
 - `"embedding"` or `"latent"`
 - `"vf_norm"` / `"latent_norm"` if useful
+
+Current repo note:
+
+- the forward path now consumes `policy_embedding` directly when present
+- if `policy_embedding_dim > 0`, the batch must provide `policy_embedding`
 
 ### Model composition
 
@@ -100,6 +105,17 @@ Planned usage:
 - low-dimensional observations: start with `MLP`
 - pixel observations: start with `from_torchvision(...)`
 
+Current repo options:
+
+- `observation_encoder=identity|learned|auto`
+- `network_variant=repo|paper`
+
+`network_variant=paper` is the closest current implementation to Table 5:
+
+- single-policy width: `512`
+- multi-policy width: `1024`
+- time embedding dim: `256`
+
 ### Callbacks
 
 Callbacks are one of the main reasons to use `stable_pretraining` here.
@@ -132,7 +148,13 @@ The standard wiring is:
 Implication:
 
 - keep our training entrypoint thin
-- avoid building a separate bespoke trainer loop unless target-network updates or planning hooks force it
+- prefer paper-style `max_steps` semantics over epoch-first semantics when reproducing the method
+
+Current repo note:
+
+- training now defaults to `train_semantics="paper"`
+- the optimizer interval is step-based in that mode
+- validation is optional and disabled by default unless explicitly enabled
 
 ### What this means for TD-Flow
 
