@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "td-flow"
+version = "0.1.0"
+description = "TD²-CFM scaffold built on stable_pretraining and stable_worldmodel."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "lightning",
+  "tyro",
+  "torchdiffeq",
+  "stable-pretraining",
+  "stable-worldmodel[env,train]",
+]
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+where = ["src"]

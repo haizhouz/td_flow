@@ -1,2 +1,8 @@
 doc/td_flow_paper.txt
-.conda/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+environment*.json
+requirements_frozen*.txt
+wandb/

@@ -1,9 +1,0 @@
-name: td-flow
-channels:
-  - conda-forge
-dependencies:
-  - python=3.10
-  - pip
-  - pip:
-      - stable-pretraining
-      - stable-worldmodel[env,train]
