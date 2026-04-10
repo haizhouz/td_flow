@@ -39,6 +39,95 @@ uv run python -m td_flow.train \
   --train.limit-val-batches 1
 ```
 
+For `ogbench_npz`, the adapter now honors the same key-based interface as the HDF5 backend:
+
+- `--data.observation-key`
+- `--data.action-key`
+- `--data.goal-key`
+- `--data.policy-embedding-key`
+
+Default aliases are resolved for OGBench automatically:
+
+- `state` or `observation` -> `observations`
+- `action` -> `actions`
+- next observation -> `next_observations`
+
+So later RGB/custom-key datasets can reuse the same CLI surface without a separate loader interface.
+
+### Key Examples
+
+Default OGBench state/action aliases:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /home/haizhou/.ogbench/data \
+  --data.observation-key state \
+  --data.action-key action
+```
+
+Equivalent explicit OGBench raw keys:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /home/haizhou/.ogbench/data \
+  --data.observation-key observations \
+  --data.action-key actions
+```
+
+Custom RGB-style observation key:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name my-cube-rgb-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /path/to/dataset \
+  --data.observation-key pixels \
+  --data.action-key actions \
+  --observation-encoder learned
+```
+
+Custom goal key:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name my-goal-dataset-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /path/to/dataset \
+  --data.observation-key state \
+  --data.action-key action \
+  --data.goal-key target
+```
+
+Custom policy embedding key:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name my-multipolicy-dataset-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /path/to/dataset \
+  --data.observation-key state \
+  --data.action-key action \
+  --data.policy-embedding-key policy_z \
+  --policy-mode multi_policy \
+  --policy-embedding-dim 128
+```
+
+The same key interface also applies to `stablewm_hdf5`:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend stablewm_hdf5 \
+  --data.dir /path/to/stablewm/cache \
+  --data.observation-key pixels \
+  --data.action-key action \
+  --data.goal-key goal
+```
+
 This writes:
 
 - `outputs/<run_name>/project_config.json`

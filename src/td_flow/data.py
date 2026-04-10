@@ -19,17 +19,65 @@ class OGBenchNPZDataset(Dataset):
         self,
         dataset: dict[str, object],
         *,
+        observation_key: str = "state",
+        action_key: str = "action",
+        goal_key: str | None = None,
+        policy_embedding_key: str | None = None,
         policy_embeddings: torch.Tensor | None = None,
     ) -> None:
-        self.observations = _as_float_tensor(dataset["observations"])
-        self.actions = _as_float_tensor(dataset["actions"])
-        self.next_observations = _as_float_tensor(dataset["next_observations"])
+        self.dataset = dataset
+        self.observation_key = observation_key
+        self.action_key = action_key
+        self.goal_key = goal_key
+        self.policy_embedding_key = policy_embedding_key
         self.policy_embeddings = policy_embeddings
+        self.observations = _as_float_tensor(self._resolve_key(observation_key, default_key="observations"))
+        self.actions = _as_float_tensor(self._resolve_key(action_key, default_key="actions"))
+        self.next_observations = _as_float_tensor(
+            self._resolve_next_key(observation_key, default_key="next_observations")
+        )
         terminals = dataset.get("terminals")
         if terminals is None:
             self.terminals = torch.zeros(self.actions.shape[0], dtype=torch.bool)
         else:
             self.terminals = _as_float_tensor(terminals).bool()
+
+    def _resolve_key(self, requested_key: str, *, default_key: str) -> object:
+        if requested_key in self.dataset:
+            return self.dataset[requested_key]
+
+        alias_map = {
+            "state": "observations",
+            "observation": "observations",
+            "observations": "observations",
+            "action": "actions",
+            "actions": "actions",
+        }
+        resolved_key = alias_map.get(requested_key)
+        if resolved_key is not None and resolved_key in self.dataset:
+            return self.dataset[resolved_key]
+        if default_key in self.dataset:
+            return self.dataset[default_key]
+        raise KeyError(f"Could not resolve key '{requested_key}' in OGBench dataset.")
+
+    def _resolve_next_key(self, requested_key: str, *, default_key: str) -> object:
+        direct_next_key = f"next_{requested_key}"
+        if direct_next_key in self.dataset:
+            return self.dataset[direct_next_key]
+
+        alias_map = {
+            "state": "next_observations",
+            "observation": "next_observations",
+            "observations": "next_observations",
+            "action": "next_actions",
+            "actions": "next_actions",
+        }
+        resolved_key = alias_map.get(requested_key)
+        if resolved_key is not None and resolved_key in self.dataset:
+            return self.dataset[resolved_key]
+        if default_key in self.dataset:
+            return self.dataset[default_key]
+        raise KeyError(f"Could not resolve next-step key for '{requested_key}' in OGBench dataset.")
 
     def __len__(self) -> int:
         return int(self.observations.shape[0])
@@ -38,21 +86,37 @@ class OGBenchNPZDataset(Dataset):
         obs = self.observations[index]
         next_obs = self.next_observations[index]
         action = self.actions[index]
-        if index + 1 < len(self.actions) and not bool(self.terminals[index]):
+        next_actions = None
+        direct_next_action_key = f"next_{self.action_key}"
+        if direct_next_action_key in self.dataset:
+            next_actions = _as_float_tensor(self.dataset[direct_next_action_key])
+        elif "next_actions" in self.dataset:
+            next_actions = _as_float_tensor(self.dataset["next_actions"])
+
+        if next_actions is not None:
+            next_action = next_actions[index]
+        elif index + 1 < len(self.actions) and not bool(self.terminals[index]):
             next_action = self.actions[index + 1]
         else:
             next_action = torch.zeros_like(action)
+
+        goal = next_obs
+        if self.goal_key is not None:
+            goal = _as_float_tensor(self._resolve_key(self.goal_key, default_key="next_observations"))[index]
+
+        policy_embedding = None
+        if self.policy_embeddings is not None:
+            policy_embedding = self.policy_embeddings[index]
+        elif self.policy_embedding_key is not None and self.policy_embedding_key in self.dataset:
+            policy_embedding = _as_float_tensor(self.dataset[self.policy_embedding_key])[index]
+
         return {
             "obs": obs,
             "next_obs": next_obs,
             "action": action,
             "next_action": next_action,
-            "goal": next_obs,
-            **(
-                {"policy_embedding": self.policy_embeddings[index]}
-                if self.policy_embeddings is not None
-                else {}
-            ),
+            "goal": goal,
+            **({"policy_embedding": policy_embedding} if policy_embedding is not None else {}),
         }
 
 
@@ -148,7 +212,13 @@ def build_td2_ogbench_dataset(config: DataConfig) -> OGBenchNPZDataset:
         dataset = val_dataset
     else:
         raise ValueError("OGBench split must be one of: train, val")
-    return OGBenchNPZDataset(dataset)
+    return OGBenchNPZDataset(
+        dataset,
+        observation_key=config.observation_key,
+        action_key=config.action_key,
+        goal_key=config.goal_key,
+        policy_embedding_key=config.policy_embedding_key,
+    )
 
 
 def build_td2_dataloader(config: DataConfig, *, shuffle: bool = True) -> DataLoader:

@@ -77,6 +77,7 @@
 - Seed `pip` into the virtualenv, because `stable_pretraining` calls `python -m pip freeze` during environment dumps.
 - Training config is nested under `--data.*`, `--train.*`, and `--backbone.*` because the entrypoint uses `tyro`.
 - Dataset roots are passed with `--data.dir`; avoid calling that field `cache` in docs or code because `train.cache-root` is a separate runtime/cache concept.
+- For `ogbench_npz`, keep the same public key surface as `stablewm_hdf5`: `--data.observation-key`, `--data.action-key`, `--data.goal-key`, and `--data.policy-embedding-key`. Default aliases like `state -> observations` and `action -> actions` should work transparently.
 - Run artifacts are written under `--train.output-dir/--train.run-name`, including `project_config.json`, CSV logs, checkpoints, and `eval_metrics.json`.
 - Fresh runs always get a timestamped final run name. `--train.run-name` supplies the base prefix; otherwise the dataset name is used.
 - `--train.resume` is the only flag that enables training-state resume. `--train.resume-ckpt-path` only points to a checkpoint; by itself it does not imply resume for `fit`.
