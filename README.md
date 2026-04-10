@@ -134,6 +134,41 @@ This writes:
 - CSV logs under `outputs/<run_name>/csv/`
 - checkpoints under `outputs/<run_name>/checkpoints/`
 
+## Rollout Visualization
+
+Use the rollout entrypoint to render a checkpoint on OGBench `cube-single-play-v0` and save an autoregressive predicted trajectory seeded from one dataset state.
+
+Example:
+
+```bash
+uv run python -m td_flow.rollout \
+  --checkpoint-path outputs/cube-single-10k/checkpoints/last.ckpt \
+  --split val \
+  --horizon 8
+```
+
+By default this writes a `rollout/` directory inside the checkpoint folder, for example `outputs/<run_name>/checkpoints/rollout/`, with:
+
+- `frames/frame_000.png`, ...
+- `predicted_rollout.gif`
+- `rollout_config.json`
+
+Important limits for the current script:
+
+- only `ogbench_npz` checkpoints are supported
+- only `cube-single-play-v0` is supported
+- only `identity` / `no_encoder` observation encoders are supported
+
+You can override the destination or choose a deterministic start:
+
+```bash
+uv run python -m td_flow.rollout \
+  --checkpoint-path outputs/cube-single-10k/checkpoints/last.ckpt \
+  --output-dir /tmp/cube-rollout \
+  --start-index 100 \
+  --horizon 12
+```
+
 Fresh runs always use a timestamped run name. If you do not set `--train.run-name`, the base name is the dataset name and the final run looks like `cube-single-play-v0-20260409-210000`. If you set `--train.run-name cube-single-smoke`, the final run name becomes `cube-single-smoke-20260409-210000`.
 
 Resume a run from the latest checkpoint:

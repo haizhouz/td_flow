@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `src/td_flow/`: main package. Core files are `model.py`, `module.py`, `data.py`, `planner.py`, and `train.py`.
+- `src/td_flow/`: main package. Core files are `model.py`, `module.py`, `data.py`, `planner.py`, `train.py`, and `rollout.py`.
 - `tests/`: `unittest` smoke tests for data loading, model architecture, training entrypoints, paths, ODE behavior, and planner interfaces.
 - `doc/`: paper, implementation plan, and backbone notes.
 - `README.md`: setup, training commands, and the `tyro` config tutorial.
@@ -42,6 +42,10 @@
   ```bash
   uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --data.dir /home/haizhou/.ogbench/data --train.run-name smoke --train.use-wandb --train.wandb-project td_flow --train.wandb-offline
   ```
+- Render a checkpoint rollout as predicted frames:
+  ```bash
+  uv run python -m td_flow.rollout --checkpoint-path outputs/cube-single-10k/checkpoints/last.ckpt --split val --horizon 8
+  ```
 
 ## Coding Style & Naming Conventions
 
@@ -60,6 +64,7 @@
 - Prioritize shape, interface, and smoke coverage before long training runs.
 - New planner or dataset code should include at least one tensor-shape assertion test.
 - For training-loop changes, cover checkpoint, resume, or validate-only behavior in `tests/test_train.py` when possible.
+- For rollout/rendering changes, add focused coverage in `tests/test_rollout.py` for checkpoint/config loading and dataset-state decoding.
 
 ## Commit & Pull Request Guidelines
 
@@ -95,4 +100,5 @@
 - `--train.compile` is a boolean switch; use `--train.compile`, not `--train.compile true`.
 - Compiled runs persist cache files under `--train.cache-root/compile/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
 - Use `--train.compile-cache-name` only when you want to override that default namespace explicitly.
+- `td_flow.rollout` currently targets OGBench `cube-single-play-v0` with `ogbench_npz` checkpoints and identity observation encoding. It renders an initial seeded state plus the predicted trajectory, and its default output path is `<checkpoint_dir>/rollout/`; update docs/tests if that support surface changes.
 - `.venv/`, `.pyc`, `__pycache__/`, and generated environment dumps should remain untracked.
