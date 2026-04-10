@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -83,6 +86,148 @@ def resolve_run_dir(project_config: ProjectConfig) -> Path:
     return Path(project_config.train.output_dir) / run_name
 
 
+def timestamped_run_name(dataset_name: str) -> str:
+    return f"{dataset_name}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+
+
+_RUN_NAME_TIMESTAMP_RE = re.compile(r"^(?P<base>.+)-(?P<ts>\d{8}-\d{6}(?:-\d{6})?)$")
+
+
+def parse_run_name_timestamp(run_name: str) -> str | None:
+    match = _RUN_NAME_TIMESTAMP_RE.match(run_name)
+    if match is None:
+        return None
+    return match.group("ts")
+
+
+def has_timestamped_suffix(run_name: str) -> bool:
+    return parse_run_name_timestamp(run_name) is not None
+
+
+def _checkpoint_run_dir_from_path(ckpt_path: str) -> Path:
+    checkpoint_path = Path(ckpt_path)
+    if checkpoint_path.parent.name == "checkpoints":
+        return checkpoint_path.parent.parent
+    return checkpoint_path.parent
+
+
+def find_latest_run_name(output_dir: Path, dataset_name: str) -> str | None:
+    prefix = f"{dataset_name}-"
+    candidates = []
+    if output_dir.exists():
+        for path in output_dir.iterdir():
+            if not path.is_dir() or not path.name.startswith(prefix):
+                continue
+            timestamp = parse_run_name_timestamp(path.name)
+            if timestamp is None:
+                continue
+            candidates.append((timestamp, path.name))
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def resolve_resume_run_name(output_dir: Path, run_name: str) -> str | None:
+    exact_dir = output_dir / run_name
+    if has_timestamped_suffix(run_name) and exact_dir.is_dir():
+        return run_name
+
+    latest_timestamped = find_latest_run_name(output_dir, run_name)
+    if latest_timestamped is not None:
+        return latest_timestamped
+
+    if exact_dir.is_dir():
+        return run_name
+
+    return None
+
+
+def resolve_latest_checkpoint_path(run_dir: Path) -> str:
+    checkpoint_dir = run_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(f"No checkpoint directory found at {checkpoint_dir}")
+
+    last_checkpoint = checkpoint_dir / "last.ckpt"
+    if last_checkpoint.exists():
+        return str(last_checkpoint)
+
+    candidates = sorted(
+        (path for path in checkpoint_dir.glob("*.ckpt") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoint files found at {checkpoint_dir}")
+    return str(candidates[0])
+
+
+def normalize_project_config(project_config: ProjectConfig) -> ProjectConfig:
+    output_dir = Path(project_config.train.output_dir)
+    train_config = project_config.train
+
+    run_name = train_config.run_name
+    checkpoint_run_name = (
+        _checkpoint_run_dir_from_path(train_config.resume_ckpt_path).name
+        if train_config.resume_ckpt_path is not None
+        else None
+    )
+    if train_config.run_mode == "validate" and checkpoint_run_name is not None:
+        if run_name is not None and run_name != checkpoint_run_name:
+            raise ValueError(
+                f"resume_ckpt_path belongs to run '{checkpoint_run_name}', which does not match run_name '{run_name}'"
+            )
+        run_name = checkpoint_run_name
+    elif run_name is None:
+        if train_config.run_mode == "validate" and train_config.resume_ckpt_path is not None:
+            run_name = checkpoint_run_name
+        elif train_config.resume:
+            if checkpoint_run_name is not None:
+                run_name = checkpoint_run_name
+            else:
+                latest_run_name = find_latest_run_name(output_dir, project_config.data.dataset_name)
+                if latest_run_name is None:
+                    raise FileNotFoundError(
+                        f"No prior run found for dataset prefix '{project_config.data.dataset_name}-' in {output_dir}"
+                    )
+                run_name = latest_run_name
+        else:
+            run_name = resolve_fresh_run_name(project_config, project_config.data.dataset_name)
+    elif train_config.run_mode == "fit":
+        if train_config.resume:
+            if checkpoint_run_name is not None:
+                if run_name != checkpoint_run_name and not checkpoint_run_name.startswith(f"{run_name}-"):
+                    raise ValueError(
+                        f"resume_ckpt_path belongs to run '{checkpoint_run_name}', which does not match run_name '{run_name}'"
+                    )
+                run_name = checkpoint_run_name
+            else:
+                resolved_run_name = resolve_resume_run_name(output_dir, run_name)
+                if resolved_run_name is None:
+                    raise FileNotFoundError(
+                        f"No prior run found for run name or prefix '{run_name}' in {output_dir}"
+                    )
+                run_name = resolved_run_name
+        elif not has_timestamped_suffix(run_name):
+            run_name = resolve_fresh_run_name(project_config, run_name)
+
+    resume_ckpt_path = train_config.resume_ckpt_path
+    if train_config.run_mode == "fit":
+        if train_config.resume:
+            if resume_ckpt_path is None:
+                resume_ckpt_path = resolve_latest_checkpoint_path(output_dir / run_name)
+        else:
+            resume_ckpt_path = None
+
+    return replace(
+        project_config,
+        train=replace(
+            train_config,
+            run_name=run_name,
+            resume_ckpt_path=resume_ckpt_path,
+        ),
+    )
+
+
 def resolve_cache_root(project_config: ProjectConfig) -> Path:
     return Path(project_config.train.cache_root)
 
@@ -98,8 +243,16 @@ def resolve_wandb_state_dir(project_config: ProjectConfig) -> Path:
     return resolve_cache_run_dir(project_config) / "wandb"
 
 
+def get_world_size() -> int:
+    for key in ("WORLD_SIZE", "SLURM_NTASKS"):
+        value = os.environ.get(key)
+        if value is not None:
+            return int(value)
+    return 1
+
+
 def get_global_rank() -> int:
-    for key in ("RANK", "SLURM_PROCID", "LOCAL_RANK"):
+    for key in ("RANK", "SLURM_PROCID"):
         value = os.environ.get(key)
         if value is not None:
             return int(value)
@@ -108,6 +261,52 @@ def get_global_rank() -> int:
 
 def is_global_zero() -> bool:
     return get_global_rank() == 0
+
+
+def resolve_distributed_launch_key(project_config: ProjectConfig, base_name: str) -> str | None:
+    if get_world_size() <= 1:
+        return None
+
+    preferred = os.environ.get("TORCHELASTIC_RUN_ID") or os.environ.get("SLURM_JOB_ID")
+    if preferred is not None and preferred.strip().lower() in {"", "none", "null", "nil"}:
+        preferred = None
+    shared_parts = (
+        preferred or "",
+        os.environ.get("SLURM_STEP_ID", ""),
+        os.environ.get("MASTER_ADDR", ""),
+        os.environ.get("MASTER_PORT", ""),
+        str(get_world_size()),
+        str(Path(project_config.train.output_dir).resolve()),
+        base_name,
+        project_config.train.run_mode,
+    )
+    raw_key = "|".join(shared_parts)
+    return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_fresh_run_name(project_config: ProjectConfig, base_name: str) -> str:
+    launch_key = resolve_distributed_launch_key(project_config, base_name)
+    if launch_key is None:
+        return timestamped_run_name(base_name)
+
+    coordination_dir = resolve_cache_root(project_config) / ".run_name_coord"
+    run_name_path = coordination_dir / f"{launch_key}.txt"
+    lock_path = coordination_dir / f"{launch_key}.lock"
+    if is_global_zero():
+        with file_lock(lock_path):
+            run_name = timestamped_run_name(base_name)
+            run_name_path.write_text(run_name + "\n")
+            return run_name
+
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        with file_lock(lock_path):
+            if run_name_path.exists():
+                run_name = run_name_path.read_text().strip()
+                if run_name:
+                    return run_name
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for global rank 0 to write coordinated run name at {run_name_path}")
 
 
 @contextlib.contextmanager
@@ -138,7 +337,7 @@ def resolve_wandb_run_id(project_config: ProjectConfig, state_dir: Path) -> str:
     id_path = state_dir / "wandb_run_id.txt"
     lock_path = state_dir / ".wandb_run_id.lock"
     with file_lock(lock_path):
-        if id_path.exists():
+        if project_config.train.resume and id_path.exists():
             return id_path.read_text().strip()
 
         run_id = wandb.util.generate_id()
@@ -151,7 +350,11 @@ def resolve_wandb_resume(project_config: ProjectConfig) -> str | None:
         return None
     if project_config.train.wandb_resume is not None:
         return project_config.train.wandb_resume
-    if project_config.train.resume_ckpt_path is not None and project_config.train.run_mode == "fit":
+    if (
+        project_config.train.resume
+        and project_config.train.resume_ckpt_path is not None
+        and project_config.train.run_mode == "fit"
+    ):
         return "must"
     return None
 
@@ -174,7 +377,7 @@ def resolve_wandb_resume_from(
         return None
     if project_config.train.wandb_resume is not None:
         return None
-    if project_config.train.run_mode != "fit":
+    if project_config.train.run_mode != "fit" or not project_config.train.resume:
         return None
     global_step = resolve_checkpoint_global_step(project_config.train.resume_ckpt_path)
     if global_step is None:
@@ -294,6 +497,10 @@ def build_data_module(project_config: ProjectConfig, *, mode: str) -> spt.data.D
     return spt.data.DataModule(val=val_loader)
 
 
+def has_validation_enabled(project_config: ProjectConfig) -> bool:
+    return project_config.train.limit_val_batches not in (0, 0.0)
+
+
 def build_trainer(
     project_config: ProjectConfig,
     *,
@@ -308,6 +515,7 @@ def build_trainer(
         devices=project_config.train.devices,
         precision=project_config.train.precision,
         log_every_n_steps=project_config.train.log_every_n_steps,
+        enable_progress_bar=project_config.train.enable_progress_bar,
         enable_checkpointing=project_config.train.enable_checkpointing,
         limit_train_batches=project_config.train.limit_train_batches,
         limit_val_batches=project_config.train.limit_val_batches,
@@ -440,13 +648,14 @@ def build_project_config_from_sample(
 
 
 def train(project_config: ProjectConfig) -> spt.Manager:
+    project_config = normalize_project_config(project_config)
     apply_runtime_acceleration(project_config)
     compile_cache_artifact = configure_compile_cache(project_config)
     run_dir = resolve_run_dir(project_config)
     save_project_config(project_config, run_dir)
     data_module = build_data_module(project_config, mode="fit")
     module = build_training_module(project_config.model, project_config.train)
-    has_validation = data_module.val_dataloader() is not None
+    has_validation = has_validation_enabled(project_config)
     logger = build_loggers(project_config, run_dir)
     callbacks = build_callbacks(project_config, run_dir, has_validation=has_validation)
     trainer = build_trainer(
@@ -469,6 +678,7 @@ def train(project_config: ProjectConfig) -> spt.Manager:
 
 
 def evaluate(project_config: ProjectConfig) -> list[dict[str, float]]:
+    project_config = normalize_project_config(project_config)
     if project_config.train.resume_ckpt_path is None:
         raise ValueError("resume_ckpt_path is required for run_mode=validate")
 
@@ -494,10 +704,12 @@ def evaluate(project_config: ProjectConfig) -> list[dict[str, float]]:
         datamodule=data_module,
         ckpt_path=project_config.train.resume_ckpt_path,
     )
-    metrics_path = run_dir / "eval_metrics.json"
-    metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+    if is_global_zero():
+        metrics_path = run_dir / "eval_metrics.json"
+        metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
     save_compile_cache(compile_cache_artifact)
-    print(json.dumps(results, indent=2, sort_keys=True))
+    if is_global_zero():
+        print(json.dumps(results, indent=2, sort_keys=True))
     return results
 
 

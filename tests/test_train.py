@@ -15,12 +15,19 @@ from td_flow.train import (
     build_loggers,
     configure_compile_cache,
     evaluate,
+    has_validation_enabled,
+    get_global_rank,
     resolve_cache_root,
     resolve_cache_run_dir,
+    resolve_distributed_launch_key,
+    normalize_project_config,
+    find_latest_run_name,
+    resolve_latest_checkpoint_path,
     resolve_compile_cache_artifact_path,
     resolve_compile_cache_runtime_dir,
     resolve_compile_cache_save_artifact_path,
     resolve_checkpoint_global_step,
+    resolve_fresh_run_name,
     resolve_run_dir,
     resolve_wandb_state_dir,
     resolve_wandb_resume_from,
@@ -32,6 +39,132 @@ from td_flow.train import (
 
 
 class TrainEntrypointTest(unittest.TestCase):
+    def test_get_global_rank_prefers_rank(self) -> None:
+        with patch.dict("os.environ", {"RANK": "3", "SLURM_PROCID": "1", "LOCAL_RANK": "0"}, clear=False):
+            self.assertEqual(get_global_rank(), 3)
+
+    def test_get_global_rank_uses_slurm_procid_when_rank_missing(self) -> None:
+        with patch.dict("os.environ", {"SLURM_PROCID": "2", "LOCAL_RANK": "0"}, clear=False):
+            self.assertEqual(get_global_rank(), 2)
+
+    def test_get_global_rank_ignores_local_rank_without_global_rank(self) -> None:
+        with patch.dict("os.environ", {"LOCAL_RANK": "1"}, clear=False):
+            self.assertEqual(get_global_rank(), 0)
+
+    def test_resolve_distributed_launch_key_ignores_placeholder_torchelastic_run_id(self) -> None:
+        project_config = ProjectConfig(
+            data=DataConfig(dataset_name="cube-single-play-v0"),
+            model=ModelConfig(observation_shape=(4,), action_dim=2),
+            train=TrainConfig(output_dir="outputs"),
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WORLD_SIZE": "2",
+                "TORCHELASTIC_RUN_ID": "none",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+            },
+            clear=False,
+        ):
+            placeholder_key = resolve_distributed_launch_key(project_config, "paper-run")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WORLD_SIZE": "2",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+            },
+            clear=False,
+        ):
+            fallback_key = resolve_distributed_launch_key(project_config, "paper-run")
+
+        self.assertEqual(placeholder_key, fallback_key)
+
+    def test_resolve_distributed_launch_key_includes_base_name_even_with_job_id(self) -> None:
+        project_config = ProjectConfig(
+            data=DataConfig(dataset_name="cube-single-play-v0"),
+            model=ModelConfig(observation_shape=(4,), action_dim=2),
+            train=TrainConfig(output_dir="outputs"),
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WORLD_SIZE": "2",
+                "SLURM_JOB_ID": "12345",
+                "SLURM_STEP_ID": "0",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+            },
+            clear=False,
+        ):
+            key_a = resolve_distributed_launch_key(project_config, "paper-run-a")
+            key_b = resolve_distributed_launch_key(project_config, "paper-run-b")
+
+        self.assertNotEqual(key_a, key_b)
+
+    def test_resolve_fresh_run_name_global_zero_overwrites_stale_coordination_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(cache_root=tmpdir, output_dir="outputs"),
+            )
+            coordination_dir = Path(tmpdir) / ".run_name_coord"
+            coordination_dir.mkdir(parents=True, exist_ok=True)
+            stale_file = coordination_dir / "abc123.txt"
+            stale_file.write_text("stale-run-name\n")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "WORLD_SIZE": "2",
+                    "RANK": "0",
+                    "MASTER_ADDR": "127.0.0.1",
+                    "MASTER_PORT": "29500",
+                },
+                clear=False,
+            ), patch(
+                "td_flow.train.resolve_distributed_launch_key", return_value="abc123"
+            ), patch(
+                "td_flow.train.timestamped_run_name", return_value="fresh-run-name"
+            ):
+                run_name = resolve_fresh_run_name(project_config, "paper-run")
+
+            self.assertEqual(run_name, "fresh-run-name")
+            self.assertEqual(stale_file.read_text().strip(), "fresh-run-name")
+
+    def test_resolve_fresh_run_name_nonzero_rank_reads_global_zero_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(cache_root=tmpdir, output_dir="outputs"),
+            )
+            coordination_dir = Path(tmpdir) / ".run_name_coord"
+            coordination_dir.mkdir(parents=True, exist_ok=True)
+            run_name_file = coordination_dir / "abc123.txt"
+            run_name_file.write_text("fresh-run-name\n")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "WORLD_SIZE": "2",
+                    "RANK": "1",
+                    "MASTER_ADDR": "127.0.0.1",
+                    "MASTER_PORT": "29500",
+                },
+                clear=False,
+            ), patch(
+                "td_flow.train.resolve_distributed_launch_key", return_value="abc123"
+            ):
+                run_name = resolve_fresh_run_name(project_config, "paper-run")
+
+            self.assertEqual(run_name, "fresh-run-name")
+
     def test_resolve_run_dir_uses_run_name(self) -> None:
         project_config = ProjectConfig(
             data=DataConfig(dataset_name="cube-single-play-v0"),
@@ -58,6 +191,300 @@ class TrainEntrypointTest(unittest.TestCase):
             Path("/tmp/td-flow-cache") / "paper-run" / "wandb",
         )
 
+    def test_normalize_project_config_adds_timestamped_default_run_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir),
+            )
+
+            with patch("td_flow.train.timestamped_run_name", return_value="cube-single-play-v0-20260409-210000"):
+                normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, "cube-single-play-v0-20260409-210000")
+            self.assertIsNone(normalized.train.resume_ckpt_path)
+
+    def test_normalize_project_config_shares_fresh_default_run_name_across_distributed_ranks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, cache_root=str(Path(tmpdir) / "cache")),
+            )
+
+            with patch(
+                "td_flow.train.timestamped_run_name",
+                side_effect=[
+                    "cube-single-play-v0-20260409-210000-111111",
+                    "cube-single-play-v0-20260409-210000-222222",
+                ],
+            ) as timestamp_mock:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "WORLD_SIZE": "2",
+                        "RANK": "0",
+                        "MASTER_ADDR": "127.0.0.1",
+                        "MASTER_PORT": "29500",
+                    },
+                    clear=False,
+                ):
+                    rank0_config = normalize_project_config(project_config)
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "WORLD_SIZE": "2",
+                        "RANK": "1",
+                        "MASTER_ADDR": "127.0.0.1",
+                        "MASTER_PORT": "29500",
+                    },
+                    clear=False,
+                ):
+                    rank1_config = normalize_project_config(project_config)
+
+            self.assertEqual(rank1_config.train.run_name, rank0_config.train.run_name)
+            self.assertEqual(timestamp_mock.call_count, 1)
+
+    def test_normalize_project_config_appends_timestamp_to_explicit_run_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, run_name="paper-run"),
+            )
+
+            with patch("td_flow.train.timestamped_run_name", return_value="paper-run-20260409-210000"):
+                normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, "paper-run-20260409-210000")
+
+    def test_normalize_project_config_shares_fresh_explicit_run_name_across_distributed_ranks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    output_dir=tmpdir,
+                    cache_root=str(Path(tmpdir) / "cache"),
+                    run_name="paper-run",
+                ),
+            )
+
+            with patch(
+                "td_flow.train.timestamped_run_name",
+                side_effect=[
+                    "paper-run-20260409-210000-111111",
+                    "paper-run-20260409-210000-222222",
+                ],
+            ) as timestamp_mock:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "WORLD_SIZE": "2",
+                        "RANK": "0",
+                        "MASTER_ADDR": "127.0.0.1",
+                        "MASTER_PORT": "29501",
+                    },
+                    clear=False,
+                ):
+                    rank0_config = normalize_project_config(project_config)
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "WORLD_SIZE": "2",
+                        "RANK": "1",
+                        "MASTER_ADDR": "127.0.0.1",
+                        "MASTER_PORT": "29501",
+                    },
+                    clear=False,
+                ):
+                    rank1_config = normalize_project_config(project_config)
+
+            self.assertEqual(rank0_config.train.run_name, rank1_config.train.run_name)
+            self.assertEqual(timestamp_mock.call_count, 1)
+
+    def test_normalize_project_config_is_idempotent_for_timestamped_run_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, run_name="paper-run-20260409-210000-123456"),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, "paper-run-20260409-210000-123456")
+
+    def test_find_latest_run_name_uses_latest_timestamped_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            older = output_dir / "cube-single-play-v0-20260409-200000"
+            newer = output_dir / "cube-single-play-v0-20260409-210000"
+            older.mkdir()
+            newer.mkdir()
+
+            self.assertEqual(
+                find_latest_run_name(output_dir, "cube-single-play-v0"),
+                newer.name,
+            )
+
+    def test_resolve_latest_checkpoint_path_prefers_last_ckpt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "run"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "step=10.ckpt").write_text("x")
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("y")
+
+            self.assertEqual(resolve_latest_checkpoint_path(run_dir), str(last_ckpt))
+
+    def test_normalize_project_config_resolve_resume_from_latest_run_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            run_dir = output_dir / "cube-single-play-v0-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, resume=True),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, run_dir.name)
+            self.assertEqual(normalized.train.resume_ckpt_path, str(last_ckpt))
+
+    def test_normalize_project_config_prefers_checkpoint_run_name_when_resuming(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            run_dir = output_dir / "cube-single-play-v0-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, resume=True, resume_ckpt_path=str(last_ckpt)),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, run_dir.name)
+            self.assertEqual(normalized.train.resume_ckpt_path, str(last_ckpt))
+
+    def test_normalize_project_config_resumes_latest_run_matching_explicit_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            older = output_dir / "paper-run-20260409-200000"
+            newer = output_dir / "paper-run-20260409-210000"
+            (older / "checkpoints").mkdir(parents=True, exist_ok=True)
+            (newer / "checkpoints").mkdir(parents=True, exist_ok=True)
+            (older / "checkpoints" / "last.ckpt").write_text("old")
+            latest_ckpt = newer / "checkpoints" / "last.ckpt"
+            latest_ckpt.write_text("new")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, run_name="paper-run", resume=True),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, newer.name)
+            self.assertEqual(normalized.train.resume_ckpt_path, str(latest_ckpt))
+
+    def test_normalize_project_config_prefers_timestamped_resume_run_over_plain_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            plain = output_dir / "paper-run"
+            timestamped = output_dir / "paper-run-20260409-210000"
+            plain.mkdir(parents=True, exist_ok=True)
+            (timestamped / "checkpoints").mkdir(parents=True, exist_ok=True)
+            latest_ckpt = timestamped / "checkpoints" / "last.ckpt"
+            latest_ckpt.write_text("new")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, run_name="paper-run", resume=True),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, timestamped.name)
+            self.assertEqual(normalized.train.resume_ckpt_path, str(latest_ckpt))
+
+    def test_normalize_project_config_rejects_mismatched_run_name_and_resume_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            run_dir = output_dir / "other-run-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    output_dir=tmpdir,
+                    run_name="paper-run",
+                    resume=True,
+                    resume_ckpt_path=str(last_ckpt),
+                ),
+            )
+
+            with self.assertRaises(ValueError):
+                normalize_project_config(project_config)
+
+    def test_normalize_project_config_validate_uses_checkpoint_run_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            run_dir = output_dir / "eval-run-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    run_mode="validate",
+                    output_dir=tmpdir,
+                    resume_ckpt_path=str(last_ckpt),
+                ),
+            )
+
+            normalized = normalize_project_config(project_config)
+
+            self.assertEqual(normalized.train.run_name, run_dir.name)
+
+    def test_normalize_project_config_validate_rejects_mismatched_run_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            run_dir = output_dir / "eval-run-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    run_mode="validate",
+                    output_dir=tmpdir,
+                    run_name="other-run",
+                    resume_ckpt_path=str(last_ckpt),
+                ),
+            )
+
+            with self.assertRaises(ValueError):
+                normalize_project_config(project_config)
+
     def test_build_callbacks_monitors_validation_loss_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_config = ProjectConfig(
@@ -82,6 +509,21 @@ class TrainEntrypointTest(unittest.TestCase):
             callbacks = build_callbacks(project_config, Path(tmpdir), has_validation=False)
             checkpoint = next(cb for cb in callbacks if isinstance(cb, ModelCheckpoint))
             self.assertIsNone(checkpoint.monitor)
+
+    def test_has_validation_enabled_matches_limit_val_batches(self) -> None:
+        project_config = ProjectConfig(
+            data=DataConfig(dataset_name="cube-single-play-v0"),
+            model=ModelConfig(observation_shape=(4,), action_dim=2),
+            train=TrainConfig(limit_val_batches=0),
+        )
+        self.assertFalse(has_validation_enabled(project_config))
+
+        enabled_project_config = ProjectConfig(
+            data=DataConfig(dataset_name="cube-single-play-v0"),
+            model=ModelConfig(observation_shape=(4,), action_dim=2),
+            train=TrainConfig(limit_val_batches=None),
+        )
+        self.assertTrue(has_validation_enabled(enabled_project_config))
 
     def test_throughput_callback_logs_train_fps(self) -> None:
         callback = ThroughputCallback(every_n_steps=2)
@@ -165,7 +607,7 @@ class TrainEntrypointTest(unittest.TestCase):
         project_config = ProjectConfig(
             data=DataConfig(dataset_name="cube-single-play-v0"),
             model=ModelConfig(observation_shape=(4,), action_dim=2),
-            train=TrainConfig(resume_ckpt_path="dummy.ckpt"),
+            train=TrainConfig(resume=True, resume_ckpt_path="dummy.ckpt"),
         )
 
         self.assertEqual(resolve_wandb_resume(project_config), "must")
@@ -174,7 +616,7 @@ class TrainEntrypointTest(unittest.TestCase):
         project_config = ProjectConfig(
             data=DataConfig(dataset_name="cube-single-play-v0"),
             model=ModelConfig(observation_shape=(4,), action_dim=2),
-            train=TrainConfig(resume_ckpt_path="dummy.ckpt", wandb_offline=True),
+            train=TrainConfig(resume=True, resume_ckpt_path="dummy.ckpt", wandb_offline=True),
         )
 
         self.assertIsNone(resolve_wandb_resume(project_config))
@@ -189,7 +631,7 @@ class TrainEntrypointTest(unittest.TestCase):
         project_config = ProjectConfig(
             data=DataConfig(dataset_name="cube-single-play-v0"),
             model=ModelConfig(observation_shape=(4,), action_dim=2),
-            train=TrainConfig(resume_ckpt_path="dummy.ckpt"),
+            train=TrainConfig(resume=True, resume_ckpt_path="dummy.ckpt"),
         )
 
         with patch("td_flow.train.torch.load", return_value={"global_step": 42}):
@@ -210,6 +652,7 @@ class TrainEntrypointTest(unittest.TestCase):
                     cache_root=str(Path(tmpdir) / "cache"),
                     use_wandb=True,
                     run_name="run",
+                    resume=True,
                     resume_ckpt_path="dummy.ckpt",
                     wandb_id="fixed-id",
                 ),
@@ -226,6 +669,60 @@ class TrainEntrypointTest(unittest.TestCase):
                 wandb_logger.call_args.kwargs["resume_from"],
                 "fixed-id?_step=77",
             )
+
+    def test_build_loggers_generates_new_run_id_for_fresh_run_even_if_state_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "outputs" / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state_dir = Path(tmpdir) / "cache" / "run" / "wandb"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "wandb_run_id.txt").write_text("old-id\n")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    output_dir=str(Path(tmpdir) / "outputs"),
+                    cache_root=str(Path(tmpdir) / "cache"),
+                    use_wandb=True,
+                    run_name="run",
+                ),
+            )
+
+            with patch("td_flow.train.wandb.util.generate_id", return_value="new-id"), patch(
+                "td_flow.train.WandbLogger"
+            ) as wandb_logger:
+                build_loggers(project_config, run_dir)
+
+            self.assertEqual(wandb_logger.call_args.kwargs["id"], "new-id")
+            self.assertEqual((state_dir / "wandb_run_id.txt").read_text().strip(), "new-id")
+
+    def test_train_does_not_probe_val_dataloader_when_validation_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(output_dir=tmpdir, limit_val_batches=0),
+            )
+            data_module = MagicMock()
+            data_module.val_dataloader.side_effect = AssertionError("val_dataloader should not be called")
+            manager = MagicMock()
+
+            with patch("td_flow.train.save_project_config"), patch(
+                "td_flow.train.build_data_module", return_value=data_module
+            ), patch(
+                "td_flow.train.build_training_module", return_value=MagicMock()
+            ), patch(
+                "td_flow.train.build_loggers", return_value=False
+            ), patch(
+                "td_flow.train.build_callbacks", return_value=[]
+            ), patch(
+                "td_flow.train.build_trainer", return_value=MagicMock()
+            ), patch(
+                "td_flow.train.spt.Manager", return_value=manager
+            ):
+                train(project_config)
+
+            data_module.val_dataloader.assert_not_called()
 
     def test_evaluate_requires_checkpoint_path(self) -> None:
         project_config = ProjectConfig(
@@ -265,6 +762,45 @@ class TrainEntrypointTest(unittest.TestCase):
                 evaluate(project_config)
 
             module.compile.assert_called_once_with()
+
+    def test_evaluate_nonzero_rank_does_not_write_metrics_or_print(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "eval-run-20260409-210000"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            last_ckpt = checkpoint_dir / "last.ckpt"
+            last_ckpt.write_text("ckpt")
+            project_config = ProjectConfig(
+                data=DataConfig(dataset_name="cube-single-play-v0"),
+                model=ModelConfig(observation_shape=(4,), action_dim=2),
+                train=TrainConfig(
+                    run_mode="validate",
+                    output_dir=tmpdir,
+                    resume_ckpt_path=str(last_ckpt),
+                ),
+            )
+            trainer = MagicMock()
+            trainer.validate.return_value = [{"val/loss": 0.1}]
+
+            with patch.dict("os.environ", {"RANK": "1"}, clear=False), patch(
+                "td_flow.train.build_data_module", return_value=MagicMock()
+            ), patch(
+                "td_flow.train.build_training_module", return_value=MagicMock()
+            ), patch(
+                "td_flow.train.build_loggers", return_value=False
+            ), patch(
+                "td_flow.train.build_callbacks", return_value=[]
+            ), patch(
+                "td_flow.train.build_trainer", return_value=trainer
+            ), patch(
+                "td_flow.train.pl.seed_everything"
+            ), patch(
+                "builtins.print"
+            ) as print_mock:
+                evaluate(project_config)
+
+            self.assertFalse((run_dir / "eval_metrics.json").exists())
+            print_mock.assert_not_called()
 
     def test_train_forwards_compile_flag_to_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
