@@ -121,7 +121,7 @@ def build_td2_hdf5_dataset(config: DataConfig) -> TD2CFMDataset:
         name=base_config.dataset_name,
         frameskip=base_config.frameskip,
         num_steps=base_config.num_steps,
-        cache_dir=base_config.cache_dir,
+        cache_dir=base_config.dir,
         keys_to_load=base_config.resolved_keys_to_load(),
     )
     return TD2CFMDataset(
@@ -136,7 +136,7 @@ def build_td2_hdf5_dataset(config: DataConfig) -> TD2CFMDataset:
 def build_td2_ogbench_dataset(config: DataConfig) -> OGBenchNPZDataset:
     import ogbench
 
-    dataset_dir = config.cache_dir or "/home/haizhou/.ogbench/data"
+    dataset_dir = config.dir or "/home/haizhou/.ogbench/data"
     train_dataset, val_dataset = ogbench.make_env_and_datasets(
         config.dataset_name,
         dataset_dir=dataset_dir,

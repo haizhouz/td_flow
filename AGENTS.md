@@ -28,19 +28,19 @@
   ```
 - Run a checkpointed smoke train:
   ```bash
-  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.max-steps 1 --train.run-name smoke
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --data.dir /home/haizhou/.ogbench/data --train.max-steps 1 --train.run-name smoke
   ```
 - Run the same entrypoint with `torch.compile` enabled:
   ```bash
-  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-name smoke --train.compile
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --data.dir /home/haizhou/.ogbench/data --train.run-name smoke --train.compile
   ```
 - Run validate-only from a checkpoint:
   ```bash
-  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-mode validate --train.resume-ckpt-path outputs/smoke/checkpoints/last.ckpt
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --data.dir /home/haizhou/.ogbench/data --train.run-mode validate --train.resume-ckpt-path outputs/smoke-20260409-210000/checkpoints/last.ckpt
   ```
 - Run the same entrypoint with W&B logging:
   ```bash
-  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-name smoke --train.use-wandb --train.wandb-project td_flow --train.wandb-offline
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --data.dir /home/haizhou/.ogbench/data --train.run-name smoke --train.use-wandb --train.wandb-project td_flow --train.wandb-offline
   ```
 
 ## Coding Style & Naming Conventions
@@ -76,12 +76,21 @@
 - Use `uv` and the repo-local `.venv`; do not rely on the base environment.
 - Seed `pip` into the virtualenv, because `stable_pretraining` calls `python -m pip freeze` during environment dumps.
 - Training config is nested under `--data.*`, `--train.*`, and `--backbone.*` because the entrypoint uses `tyro`.
+- Dataset roots are passed with `--data.dir`; avoid calling that field `cache` in docs or code because `train.cache-root` is a separate runtime/cache concept.
 - Run artifacts are written under `--train.output-dir/--train.run-name`, including `project_config.json`, CSV logs, checkpoints, and `eval_metrics.json`.
+- Fresh runs always get a timestamped final run name. `--train.run-name` supplies the base prefix; otherwise the dataset name is used.
+- `--train.resume` is the only flag that enables training-state resume. `--train.resume-ckpt-path` only points to a checkpoint; by itself it does not imply resume for `fit`.
+- In `fit` mode, `--train.resume` without `--train.resume-ckpt-path` resumes the latest checkpoint from the resolved run directory.
+- In `validate` mode, `--train.resume-ckpt-path` is required and determines the run directory unless an exact matching `--train.run-name` is provided.
 - CSV logging is enabled by default; W&B is optional through `--train.use-wandb`.
 - `--train.cache-root` is the shared root for local runtime/cache files such as compile artifacts and W&B local state.
-- When W&B is enabled, `wandb_run_id.txt` is stored under the cache root by default and resumed `fit` runs reuse that ID automatically unless `--train.wandb-id` overrides it; resumed online runs continue from the checkpoint `global_step`.
-- Checkpointing is enabled by default; resume and validate-only runs use `--train.resume-ckpt-path`.
+- For distributed fresh launches, ranks coordinate a single shared timestamped run name under `cache_root/.run_name_coord/`.
+- Multi-node runs require `--train.cache-root` and `--train.output-dir` to be on a shared filesystem if you want coordinated run names, checkpoints, and W&B local state.
+- When W&B is enabled, `wandb_run_id.txt` is stored under the cache root by default. Only explicit `--train.resume` runs reuse that ID; resumed online runs continue from the checkpoint `global_step`.
+- Only global rank 0 initializes local loggers, writes `eval_metrics.json`, and saves compile cache artifacts.
+- Checkpointing is enabled by default. `--train.resume` turns checkpoint resume on for `fit`, and `--train.resume-ckpt-path` optionally selects a specific checkpoint. During resume, `--train.run-name` is treated as an exact run name or prefix selector. `validate` still loads from `--train.resume-ckpt-path`.
 - `--train.log-every-n-steps` controls both metric logging cadence and the `train/fps` throughput metric.
+- `--train.enable-progress-bar` defaults to `False` so long runs rely on CSV/W&B instead of a noisy live terminal bar.
 - `--train.compile` is a boolean switch; use `--train.compile`, not `--train.compile true`.
 - Compiled runs persist cache files under `--train.cache-root/compile/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
 - Use `--train.compile-cache-name` only when you want to override that default namespace explicitly.

@@ -49,7 +49,7 @@ class DataConfig:
     num_workers: int = 4
     frameskip: int = 1
     num_steps: int = 2
-    cache_dir: str | None = None
+    dir: str | None = None
     keys_to_load: tuple[str, ...] = ()
 
     def resolved_keys_to_load(self) -> list[str]:
@@ -104,6 +104,7 @@ class TrainConfig:
     devices: int | str = "auto"
     precision: str = "32-true"
     log_every_n_steps: int = 10
+    enable_progress_bar: bool = False
     seed: int = 0
     output_dir: str = "outputs"
     run_name: str | None = None
@@ -114,6 +115,7 @@ class TrainConfig:
     checkpoint_save_top_k: int = 1
     checkpoint_every_n_train_steps: int = 10_000
     checkpoint_save_last: bool = True
+    resume: bool = False
     resume_ckpt_path: str | None = None
     limit_train_batches: int | float | None = None
     limit_val_batches: int | float | None = 0

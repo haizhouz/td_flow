@@ -29,7 +29,7 @@ Run a small OGBench smoke test:
 uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --data.batch-size 64 \
   --data.num-workers 0 \
   --train.output-dir outputs \
@@ -45,17 +45,56 @@ This writes:
 - CSV logs under `outputs/<run_name>/csv/`
 - checkpoints under `outputs/<run_name>/checkpoints/`
 
+Fresh runs always use a timestamped run name. If you do not set `--train.run-name`, the base name is the dataset name and the final run looks like `cube-single-play-v0-20260409-210000`. If you set `--train.run-name cube-single-smoke`, the final run name becomes `cube-single-smoke-20260409-210000`.
+
 Resume a run from the latest checkpoint:
 
 ```bash
 uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --train.output-dir outputs \
   --train.run-name cube-single-smoke \
-  --train.resume-ckpt-path outputs/cube-single-smoke/checkpoints/last.ckpt
+  --train.resume
 ```
+
+`--train.resume-ckpt-path` is optional in `fit` mode when `--train.resume` is set; if omitted, the trainer uses the latest checkpoint from the selected run directory. When `--train.run-name` is provided during resume, it is treated as an exact run name or a prefix to resolve the latest matching timestamped run.
+
+## Distributed Training
+
+The current distributed workflow follows standard DDP semantics:
+
+- `--data.batch-size` is the per-rank local batch size, not the global batch size.
+- Effective global batch size is approximately:
+  - `data.batch_size * world_size`
+- If you keep `--data.batch-size` fixed and add GPUs, you are increasing the effective batch size.
+
+Examples:
+
+- 1 GPU with `--data.batch-size 1024`:
+  - effective batch size `1024`
+- 4 GPUs with `--data.batch-size 256`:
+  - effective batch size `1024`
+- 4 GPUs with `--data.batch-size 1024`:
+  - effective batch size `4096`
+
+Fresh distributed launches coordinate a single shared timestamped run name across ranks. Resume is still explicit:
+
+- fresh run:
+  - no `--train.resume`
+- resumed run:
+  - `--train.resume`
+  - optional `--train.resume-ckpt-path`
+
+Distributed caveats:
+
+- `--train.cache-root` and `--train.output-dir` should be on a shared filesystem for multi-node runs.
+- Only global rank 0 writes:
+  - local W&B state
+  - `eval_metrics.json`
+  - compile cache artifacts
+- Validation in distributed mode is supported, but only rank 0 writes the final validation artifact.
 
 Enable `torch.compile` for training or resumed training with the same switch-style flag:
 
@@ -63,7 +102,7 @@ Enable `torch.compile` for training or resumed training with the same switch-sty
 uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --train.output-dir outputs \
   --train.run-name cube-single-smoke \
   --train.compile
@@ -85,7 +124,7 @@ Enable W&B logging:
 uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --train.output-dir outputs \
   --train.run-name cube-single-wandb \
   --train.use-wandb \
@@ -93,7 +132,7 @@ uv run python -m td_flow.train \
   --train.wandb-offline
 ```
 
-When W&B is enabled, local W&B files and `wandb_run_id.txt` are stored under the cache root by default. Resumed `fit` runs reuse that ID automatically unless you override `--train.wandb-id`, and resumed online runs continue from the checkpoint `global_step`.
+When W&B is enabled, local W&B files and `wandb_run_id.txt` are stored under the cache root by default. Only explicit `--train.resume` runs reuse that ID; fresh runs with the same `run_name` generate a new W&B run id. Resumed online runs continue from the checkpoint `global_step`.
 
 Run checkpointed validation only:
 
@@ -101,7 +140,7 @@ Run checkpointed validation only:
 uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --train.run-mode validate \
   --train.output-dir outputs \
   --train.run-name cube-single-smoke \
@@ -131,6 +170,7 @@ Examples:
 --train.wandb-project td_flow
 --train.output-dir outputs
 --train.run-name cube-single-paper
+--train.resume
 --train.resume-ckpt-path outputs/cube-single-paper/checkpoints/last.ckpt
 --backbone.kind mlp
 --backbone.hidden-dims 256 256
@@ -159,12 +199,16 @@ Training defaults now follow paper-style step semantics:
 - `--train.max-steps` is the primary training horizon
 - `--train.max-epochs` is only for overriding Lightning behavior during debugging
 - `--train.devices` defaults to `auto`, so Lightning uses the visible devices unless you override it
+- in distributed training, `--data.batch-size` remains per-rank; adjust it manually if you want to preserve a target global batch size
 - `--train.run-mode fit|validate` selects training or checkpointed validation
 - `--train.use-csv-logger` defaults to `True`
 - `--train.enable-checkpointing` defaults to `True`
 - `--train.checkpoint-monitor` defaults to `val_loss`
-- `--train.resume-ckpt-path` resumes `fit` or loads weights for `validate`
+- `--train.run-name` acts as a base name for fresh runs and an exact-name/prefix selector for resume
+- `--train.resume` explicitly enables checkpoint resume for `fit`
+- `--train.resume-ckpt-path` points to a specific checkpoint; for `fit`, it is only used when `--train.resume` is set
 - `--train.log-every-n-steps` controls logger cadence and the `train/fps` throughput metric
+- `--train.enable-progress-bar` defaults to `False` to avoid terminal corruption when Lightning, loguru, and W&B all write concurrently
 - `--train.compile` enables `torch.compile` for both `fit` and checkpointed `validate`
 - `--train.cache-root` is the shared root for local runtime/cache files, including compile caches and W&B local state
 - `--train.compile-cache-name` overrides the default dataset-name cache namespace
@@ -206,8 +250,23 @@ srun \
   uv run python -m td_flow.train \
   --data.dataset-name cube-single-play-v0 \
   --data.backend ogbench_npz \
-  --data.cache-dir /home/haizhou/.ogbench/data \
+  --data.dir /home/haizhou/.ogbench/data \
   --network-variant paper
 ```
 
 For multi-GPU jobs, either rely on `--train.devices auto` with the allocated GPUs or set an explicit count such as `--train.devices 4`.
+
+To preserve a paper-style global batch size across multiple GPUs, divide the local batch size by GPU count yourself. Example for 4 GPUs and target global batch `1024`:
+
+```bash
+srun \
+  --nodes=1 \
+  --ntasks=1 \
+  --gres=gpu:4 \
+  uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.dir /home/haizhou/.ogbench/data \
+  --data.batch-size 256 \
+  --train.devices 4
+```
