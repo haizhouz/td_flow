@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import replace
 from pathlib import Path
 
 import lightning as pl
 import stable_pretraining as spt
+import torch
 import tyro
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
@@ -166,6 +168,54 @@ def build_trainer(
     return pl.Trainer(**trainer_kwargs)
 
 
+def apply_runtime_acceleration(project_config: ProjectConfig) -> None:
+    matmul_precision = project_config.train.matmul_precision
+    if matmul_precision is None:
+        return
+    torch.set_float32_matmul_precision(matmul_precision)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = matmul_precision in {"high", "medium"}
+        torch.backends.cudnn.allow_tf32 = matmul_precision in {"high", "medium"}
+
+
+def resolve_compile_cache_artifact_path(project_config: ProjectConfig) -> Path | None:
+    cache_dir = project_config.train.compile_cache_dir
+    if cache_dir is None:
+        return None
+    cache_name = project_config.train.compile_cache_name or project_config.data.dataset_name
+    return Path(cache_dir) / cache_name / "cache_artifacts.bin"
+
+
+def configure_compile_cache(project_config: ProjectConfig) -> Path | None:
+    if not project_config.train.compile:
+        return None
+
+    artifact_path = resolve_compile_cache_artifact_path(project_config)
+    if artifact_path is None:
+        return None
+
+    cache_dir = artifact_path.parent
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+    os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(cache_dir.resolve())
+
+    if artifact_path.exists() and hasattr(torch.compiler, "load_cache_artifacts"):
+        torch.compiler.load_cache_artifacts(artifact_path.read_bytes())
+
+    return artifact_path
+
+
+def save_compile_cache(artifact_path: Path | None) -> None:
+    if artifact_path is None or not hasattr(torch.compiler, "save_cache_artifacts"):
+        return
+    artifacts = torch.compiler.save_cache_artifacts()
+    if artifacts is None:
+        return
+    artifact_bytes, _cache_info = artifacts
+    artifact_path.write_bytes(artifact_bytes)
+
+
 def build_project_config_from_sample(
     entry_config: TrainEntryConfig,
 ) -> ProjectConfig:
@@ -200,6 +250,8 @@ def build_project_config_from_sample(
 
 
 def train(project_config: ProjectConfig) -> spt.Manager:
+    apply_runtime_acceleration(project_config)
+    compile_cache_artifact = configure_compile_cache(project_config)
     run_dir = resolve_run_dir(project_config)
     save_project_config(project_config, run_dir)
     data_module = build_data_module(project_config, mode="fit")
@@ -219,8 +271,10 @@ def train(project_config: ProjectConfig) -> spt.Manager:
         data=data_module,
         seed=project_config.train.seed,
         ckpt_path=project_config.train.resume_ckpt_path,
+        compile=project_config.train.compile,
     )
     manager()
+    save_compile_cache(compile_cache_artifact)
     return manager
 
 
@@ -228,10 +282,14 @@ def evaluate(project_config: ProjectConfig) -> list[dict[str, float]]:
     if project_config.train.resume_ckpt_path is None:
         raise ValueError("resume_ckpt_path is required for run_mode=validate")
 
+    apply_runtime_acceleration(project_config)
+    compile_cache_artifact = configure_compile_cache(project_config)
     run_dir = resolve_run_dir(project_config)
     save_project_config(project_config, run_dir)
     data_module = build_data_module(project_config, mode="validate")
     module = build_training_module(project_config.model, project_config.train)
+    if project_config.train.compile:
+        module.compile()
     logger = build_loggers(project_config, run_dir)
     callbacks = build_callbacks(project_config, run_dir, has_validation=True)
     trainer = build_trainer(
@@ -248,6 +306,7 @@ def evaluate(project_config: ProjectConfig) -> list[dict[str, float]]:
     )
     metrics_path = run_dir / "eval_metrics.json"
     metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+    save_compile_cache(compile_cache_artifact)
     print(json.dumps(results, indent=2, sort_keys=True))
     return results
 

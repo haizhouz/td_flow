@@ -6,6 +6,28 @@ import torch
 from torchdiffeq import odeint
 
 
+def _manual_midpoint_integrate(
+    vector_field: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    source: torch.Tensor,
+    t_end: torch.Tensor,
+    *,
+    steps: int,
+) -> torch.Tensor:
+    x_t = source
+    dt = t_end / float(steps)
+    dt_view = dt.view(-1, *([1] * (source.ndim - 1)))
+    half_dt_view = 0.5 * dt_view
+
+    for step in range(steps):
+        t_i = dt * float(step)
+        k1 = vector_field(x_t, t_i)
+        midpoint = x_t + half_dt_view * k1
+        k2 = vector_field(midpoint, t_i + 0.5 * dt)
+        x_t = x_t + dt_view * k2
+
+    return x_t
+
+
 def midpoint_integrate(
     vector_field: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     source: torch.Tensor,
@@ -25,6 +47,14 @@ def midpoint_integrate(
         )
     else:
         t_end = t_end.to(device=source.device, dtype=source.dtype)
+
+    if torch.compiler.is_compiling():
+        return _manual_midpoint_integrate(
+            vector_field,
+            source,
+            t_end,
+            steps=steps,
+        )
 
     class _ScaledVectorField(torch.nn.Module):
         def __init__(

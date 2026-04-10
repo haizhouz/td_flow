@@ -57,6 +57,29 @@ uv run python -m td_flow.train \
   --train.resume-ckpt-path outputs/cube-single-smoke/checkpoints/last.ckpt
 ```
 
+Enable `torch.compile` for training or resumed training with the same switch-style flag:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.cache-dir /home/haizhou/.ogbench/data \
+  --train.output-dir outputs \
+  --train.run-name cube-single-smoke \
+  --train.compile
+```
+
+Compiled runs now persist PyTorch compile caches by default in `.torchinductor_cache/`. Override or disable that with:
+
+```bash
+--train.compile-cache-dir /path/to/torchinductor_cache
+--train.compile-cache-name my-shared-cache
+--train.compile-cache-dir None
+```
+
+By default, the cache namespace uses `data.dataset_name`, so repeated runs on the same dataset reuse the same compiled artifacts unless you override `--train.compile-cache-name`.
+If a compatible cache artifact is present, the training entrypoint will preload it before compiling and save updated artifacts back after the run.
+
 Run checkpointed validation only:
 
 ```bash
@@ -126,6 +149,9 @@ Training defaults now follow paper-style step semantics:
 - `--train.enable-checkpointing` defaults to `True`
 - `--train.checkpoint-monitor` defaults to `val_loss`
 - `--train.resume-ckpt-path` resumes `fit` or loads weights for `validate`
+- `--train.compile` enables `torch.compile` for both `fit` and checkpointed `validate`
+- `--train.compile-cache-dir` controls persistent Inductor/artifact caches across runs
+- `--train.compile-cache-name` overrides the default dataset-name cache namespace
 
 When the corresponding field is left unset, paper defaults are resolved by `policy_mode`:
 

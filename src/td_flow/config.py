@@ -86,6 +86,10 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     run_mode: str = "fit"
+    compile: bool = False
+    matmul_precision: str | None = "high"
+    compile_cache_dir: str | None = ".torchinductor_cache"
+    compile_cache_name: str | None = None
     train_semantics: str = "paper"
     lr: float = 1e-4
     weight_decay: float | None = None

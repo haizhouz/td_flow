@@ -30,6 +30,10 @@
   ```bash
   uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.max-steps 1 --train.run-name smoke
   ```
+- Run the same entrypoint with `torch.compile` enabled:
+  ```bash
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-name smoke --train.compile
+  ```
 - Run validate-only from a checkpoint:
   ```bash
   uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-mode validate --train.resume-ckpt-path outputs/smoke/checkpoints/last.ckpt
@@ -71,4 +75,7 @@
 - Run artifacts are written under `--train.output-dir/--train.run-name`, including `project_config.json`, CSV logs, checkpoints, and `eval_metrics.json`.
 - CSV logging is enabled by default; W&B is optional through `--train.use-wandb`.
 - Checkpointing is enabled by default; resume and validate-only runs use `--train.resume-ckpt-path`.
+- `--train.compile` is a boolean switch; use `--train.compile`, not `--train.compile true`.
+- Compiled runs persist cache files under `--train.compile-cache-dir/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
+- Use `--train.compile-cache-name` only when you want to override that default namespace explicitly.
 - `.venv/`, `.pyc`, `__pycache__/`, and generated environment dumps should remain untracked.
