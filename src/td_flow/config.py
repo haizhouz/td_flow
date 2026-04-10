@@ -87,8 +87,8 @@ class ModelConfig:
 class TrainConfig:
     run_mode: str = "fit"
     compile: bool = False
+    cache_root: str = ".cache/td_flow"
     matmul_precision: str | None = "high"
-    compile_cache_dir: str | None = ".torchinductor_cache"
     compile_cache_name: str | None = None
     train_semantics: str = "paper"
     lr: float = 1e-4
@@ -120,7 +120,13 @@ class TrainConfig:
     use_wandb: bool = False
     wandb_project: str = "td_flow"
     wandb_name: str | None = None
-    wandb_save_dir: str = "."
+    wandb_entity: str | None = None
+    wandb_group: str | None = None
+    wandb_tags: tuple[str, ...] = ()
+    wandb_notes: str | None = None
+    wandb_id: str | None = None
+    wandb_resume: str | None = None
+    wandb_save_dir: str | None = None
     wandb_offline: bool = False
     wandb_log_model: bool = False
 

@@ -38,6 +38,10 @@
   ```bash
   uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-mode validate --train.resume-ckpt-path outputs/smoke/checkpoints/last.ckpt
   ```
+- Run the same entrypoint with W&B logging:
+  ```bash
+  uv run python -m td_flow.train --data.dataset-name cube-single-play-v0 --data.backend ogbench_npz --train.run-name smoke --train.use-wandb --train.wandb-project td_flow --train.wandb-offline
+  ```
 
 ## Coding Style & Naming Conventions
 
@@ -74,8 +78,11 @@
 - Training config is nested under `--data.*`, `--train.*`, and `--backbone.*` because the entrypoint uses `tyro`.
 - Run artifacts are written under `--train.output-dir/--train.run-name`, including `project_config.json`, CSV logs, checkpoints, and `eval_metrics.json`.
 - CSV logging is enabled by default; W&B is optional through `--train.use-wandb`.
+- `--train.cache-root` is the shared root for local runtime/cache files such as compile artifacts and W&B local state.
+- When W&B is enabled, `wandb_run_id.txt` is stored under the cache root by default and resumed `fit` runs reuse that ID automatically unless `--train.wandb-id` overrides it; resumed online runs continue from the checkpoint `global_step`.
 - Checkpointing is enabled by default; resume and validate-only runs use `--train.resume-ckpt-path`.
+- `--train.log-every-n-steps` controls both metric logging cadence and the `train/fps` throughput metric.
 - `--train.compile` is a boolean switch; use `--train.compile`, not `--train.compile true`.
-- Compiled runs persist cache files under `--train.compile-cache-dir/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
+- Compiled runs persist cache files under `--train.cache-root/compile/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
 - Use `--train.compile-cache-name` only when you want to override that default namespace explicitly.
 - `.venv/`, `.pyc`, `__pycache__/`, and generated environment dumps should remain untracked.

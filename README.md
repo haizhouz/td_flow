@@ -69,16 +69,31 @@ uv run python -m td_flow.train \
   --train.compile
 ```
 
-Compiled runs now persist PyTorch compile caches by default in `.torchinductor_cache/`. Override or disable that with:
+Cached runtime files now default under `.cache/td_flow/`. Compile artifacts live under `.cache/td_flow/compile/`, and local W&B files live under `.cache/td_flow/<run_name>/wandb/`. Override or disable that with:
 
 ```bash
---train.compile-cache-dir /path/to/torchinductor_cache
+--train.cache-root /scratch/$USER/td_flow_cache
 --train.compile-cache-name my-shared-cache
---train.compile-cache-dir None
 ```
 
-By default, the cache namespace uses `data.dataset_name`, so repeated runs on the same dataset reuse the same compiled artifacts unless you override `--train.compile-cache-name`.
-If a compatible cache artifact is present, the training entrypoint will preload it before compiling and save updated artifacts back after the run.
+By default, the compile-cache namespace uses `data.dataset_name`, so repeated runs on the same dataset reuse the same compiled artifacts unless you override `--train.compile-cache-name`.
+If a compatible compile artifact is present, the training entrypoint will preload it before compiling and save updated artifacts back after the run.
+
+Enable W&B logging:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name cube-single-play-v0 \
+  --data.backend ogbench_npz \
+  --data.cache-dir /home/haizhou/.ogbench/data \
+  --train.output-dir outputs \
+  --train.run-name cube-single-wandb \
+  --train.use-wandb \
+  --train.wandb-project td_flow \
+  --train.wandb-offline
+```
+
+When W&B is enabled, local W&B files and `wandb_run_id.txt` are stored under the cache root by default. Resumed `fit` runs reuse that ID automatically unless you override `--train.wandb-id`, and resumed online runs continue from the checkpoint `global_step`.
 
 Run checkpointed validation only:
 
@@ -149,9 +164,13 @@ Training defaults now follow paper-style step semantics:
 - `--train.enable-checkpointing` defaults to `True`
 - `--train.checkpoint-monitor` defaults to `val_loss`
 - `--train.resume-ckpt-path` resumes `fit` or loads weights for `validate`
+- `--train.log-every-n-steps` controls logger cadence and the `train/fps` throughput metric
 - `--train.compile` enables `torch.compile` for both `fit` and checkpointed `validate`
-- `--train.compile-cache-dir` controls persistent Inductor/artifact caches across runs
+- `--train.cache-root` is the shared root for local runtime/cache files, including compile caches and W&B local state
 - `--train.compile-cache-name` overrides the default dataset-name cache namespace
+- `--train.use-wandb` enables W&B logging in addition to CSV logging
+- `--train.wandb-offline` keeps runs local; in offline mode W&B resume is intentionally disabled
+- `--train.wandb-id`, `--train.wandb-resume`, `--train.wandb-group`, `--train.wandb-tags`, and `--train.wandb-notes` expose the common W&B run controls
 
 When the corresponding field is left unset, paper defaults are resolved by `policy_mode`:
 
