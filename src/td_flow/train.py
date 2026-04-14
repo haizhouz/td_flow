@@ -638,6 +638,14 @@ def build_project_config_from_sample(
         network_variant=entry_config.network_variant,
         latent_dim=latent_dim,
         policy_embedding_dim=max(policy_embedding_dim, entry_config.policy_embedding_dim),
+        gamma=entry_config.gamma,
+        polyak=entry_config.polyak,
+        direct_loss_weight=entry_config.direct_loss_weight,
+        bootstrap_loss_weight=entry_config.bootstrap_loss_weight,
+        bootstrap_time_sampling=entry_config.bootstrap_time_sampling,
+        bootstrap_time_late_prob=entry_config.bootstrap_time_late_prob,
+        bootstrap_time_late_start=entry_config.bootstrap_time_late_start,
+        initialization=entry_config.initialization,
         policy_mode=entry_config.policy_mode,
     )
     return ProjectConfig(

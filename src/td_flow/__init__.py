@@ -13,6 +13,8 @@ from .data import (
     build_td2_dataloader,
     build_td2_hdf5_dataset,
     build_td2_ogbench_dataset,
+    compute_episode_lengths,
+    summarize_episode_lengths,
 )
 from .model import TD2CFMModel
 from .module import build_training_module, td2_cfm_forward
@@ -37,5 +39,7 @@ __all__ = [
     "build_td2_hdf5_dataset",
     "build_td2_ogbench_dataset",
     "build_training_module",
+    "compute_episode_lengths",
+    "summarize_episode_lengths",
     "td2_cfm_forward",
 ]

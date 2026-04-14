@@ -6,3 +6,7 @@ __pycache__/
 environment*.json
 requirements_frozen*.txt
 wandb/
+.cache
+data/
+outputs/
+.codex/

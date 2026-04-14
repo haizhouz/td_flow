@@ -2,8 +2,12 @@
 
 ## Project Structure & Module Organization
 
-- `src/td_flow/`: main package. Core files are `model.py`, `module.py`, `data.py`, `planner.py`, `train.py`, and `rollout.py`.
-- `tests/`: `unittest` smoke tests for data loading, model architecture, training entrypoints, paths, ODE behavior, and planner interfaces.
+- `src/td_flow/`: main package. Core files are `model.py`, `module.py`, `data.py`, `planner.py`, `train.py`, `rollout.py`, and `dataset_stats.py`.
+- `src/td_flow/pointmass/`: pointmass loop-policy experiments, dataset builders, occupancy plots, and TD2 analysis scripts.
+- `src/td_flow/toy/`: toy circle-policy dataset generation and TD2 diagnostics.
+- `tests/`: shared `unittest` coverage for data loading, model architecture, training entrypoints, paths, ODE behavior, and planner interfaces.
+- `tests/pointmass/`: focused tests for pointmass utilities and plotting.
+- `tests/toy/`: focused tests for toy dataset generation.
 - `doc/`: paper, implementation plan, and backbone notes.
 - `README.md`: setup, training commands, and the `tyro` config tutorial.
 
@@ -46,6 +50,10 @@
   ```bash
   uv run python -m td_flow.rollout --checkpoint-path outputs/cube-single-10k/checkpoints/last.ckpt --split val --horizon 8
   ```
+- Print OGBench episode-length stats:
+  ```bash
+  uv run python -m td_flow.dataset_stats --dataset-name cube-single-play-v0 --dataset-dir /home/haizhou/.ogbench/data --split train
+  ```
 
 ## Coding Style & Naming Conventions
 
@@ -65,6 +73,7 @@
 - New planner or dataset code should include at least one tensor-shape assertion test.
 - For training-loop changes, cover checkpoint, resume, or validate-only behavior in `tests/test_train.py` when possible.
 - For rollout/rendering changes, add focused coverage in `tests/test_rollout.py` for checkpoint/config loading and dataset-state decoding.
+- For dataset parsing utilities, add focused coverage in `tests/test_data.py` for episode-boundary reconstruction and summary statistics.
 
 ## Commit & Pull Request Guidelines
 
@@ -101,4 +110,5 @@
 - Compiled runs persist cache files under `--train.cache-root/compile/<dataset_name>/` by default so repeated runs on the same dataset can reuse compatible compile artifacts.
 - Use `--train.compile-cache-name` only when you want to override that default namespace explicitly.
 - `td_flow.rollout` currently targets OGBench `cube-single-play-v0` with `ogbench_npz` checkpoints and identity observation encoding. It renders an initial seeded state plus the predicted trajectory, and its default output path is `<checkpoint_dir>/rollout/`; update docs/tests if that support surface changes.
+- `td_flow.dataset_stats` reconstructs trajectories from flat OGBench transitions via the `terminals` array; keep that interpretation consistent with the loaders.
 - `.venv/`, `.pyc`, `__pycache__/`, and generated environment dumps should remain untracked.

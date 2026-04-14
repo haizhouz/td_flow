@@ -169,6 +169,19 @@ uv run python -m td_flow.rollout \
   --horizon 12
 ```
 
+## Pointmass And Toy Utilities
+
+Pointmass-specific experiment scripts now live under `td_flow.pointmass` and toy-circle helpers live under `td_flow.toy`.
+
+Examples:
+
+```bash
+uv run python -m td_flow.pointmass.plot_policy_conditioned_occupancy --help
+uv run python -m td_flow.pointmass.analyze_td2_failure --help
+uv run python -m td_flow.toy.generate_circle_policy_dataset --help
+uv run python -m td_flow.toy.plot_circle_policy_conditioned_occupancy --help
+```
+
 Fresh runs always use a timestamped run name. If you do not set `--train.run-name`, the base name is the dataset name and the final run looks like `cube-single-play-v0-20260409-210000`. If you set `--train.run-name cube-single-smoke`, the final run name becomes `cube-single-smoke-20260409-210000`.
 
 Resume a run from the latest checkpoint:
@@ -272,6 +285,25 @@ uv run python -m td_flow.train \
 ```
 
 For OGBench, validate mode uses the dataset's `val` split automatically and writes `eval_metrics.json` into the run directory.
+
+## Dataset Stats
+
+To inspect OGBench episode counts and trajectory lengths:
+
+```bash
+uv run python -m td_flow.dataset_stats \
+  --dataset-name cube-single-play-v0 \
+  --dataset-dir /home/haizhou/.ogbench/data \
+  --split train
+```
+
+This prints JSON with:
+
+- `num_transitions`
+- `num_episodes`
+- `min_length`
+- `max_length`
+- `mean_length`
 
 ## Config Tutorial
 

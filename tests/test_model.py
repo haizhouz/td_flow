@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
@@ -117,6 +118,27 @@ class ModelTest(unittest.TestCase):
         )
         self.assertEqual(module.optim["interval"], "step")
 
+    def test_train_batch_end_updates_targets(self) -> None:
+        module = build_training_module(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+            ),
+            TrainConfig(train_semantics="paper"),
+        )
+        module.log = MagicMock()
+        outputs = {
+            "loss": torch.tensor(1.0),
+            "loss_direct": torch.tensor(0.5),
+            "loss_bootstrap": torch.tensor(0.25),
+        }
+        batch = {"obs": torch.zeros(3, 4)}
+
+        with patch.object(module.td2_cfm, "update_targets") as update_targets:
+            module.on_train_batch_end(outputs, batch, 0)
+
+        update_targets.assert_called_once_with()
+
     def test_paper_defaults_split_by_policy_mode(self) -> None:
         single_policy_model = TD2CFMModel(
             ModelConfig(
@@ -161,6 +183,82 @@ class ModelTest(unittest.TestCase):
     def test_paper_max_steps_split_by_policy_mode(self) -> None:
         self.assertEqual(resolve_paper_max_steps("single_policy"), 3_000_000)
         self.assertEqual(resolve_paper_max_steps("multi_policy"), 8_000_000)
+
+    def test_loss_weights_default_to_gamma_split(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                gamma=0.95,
+            )
+        )
+
+        direct_weight, bootstrap_weight = model.loss_weights()
+
+        self.assertAlmostEqual(direct_weight, 0.05)
+        self.assertAlmostEqual(bootstrap_weight, 0.95)
+
+    def test_loss_weights_allow_explicit_override(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                gamma=0.99,
+                direct_loss_weight=0.1,
+                bootstrap_loss_weight=0.9,
+            )
+        )
+
+        direct_weight, bootstrap_weight = model.loss_weights()
+
+        self.assertAlmostEqual(direct_weight, 0.1)
+        self.assertAlmostEqual(bootstrap_weight, 0.9)
+
+    def test_loss_weights_require_both_override_values(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                direct_loss_weight=0.1,
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            model.loss_weights()
+
+    def test_orthogonal_initialization_zeroes_linear_biases(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                initialization="orthogonal",
+            )
+        )
+
+        linear_modules = [module for module in model.vector_field.modules() if isinstance(module, nn.Linear)]
+        self.assertTrue(linear_modules)
+        for module in linear_modules:
+            if module.bias is not None:
+                self.assertTrue(torch.allclose(module.bias, torch.zeros_like(module.bias)))
+
+    def test_late_mixture_bootstrap_time_sampling_biases_toward_endpoint(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                bootstrap_time_sampling="late_mixture",
+                bootstrap_time_late_prob=0.5,
+                bootstrap_time_late_start=0.9,
+            )
+        )
+
+        t = model.sample_bootstrap_time(20000, dtype=torch.float32)
+
+        self.assertGreaterEqual(float((t >= 0.9).float().mean()), 0.45)
+        self.assertGreaterEqual(float(t.min()), model.cfg.time_eps - 1e-7)
+        self.assertLessEqual(float(t.max()), 1.0 - model.cfg.time_eps + 1e-7)
 
 
 if __name__ == "__main__":

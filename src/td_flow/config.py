@@ -43,6 +43,7 @@ class DataConfig:
     split: str = "train"
     observation_key: str = "state"
     action_key: str = "action"
+    next_action_key: str | None = None
     goal_key: str | None = None
     policy_embedding_key: str | None = None
     batch_size: int = 1024
@@ -56,6 +57,8 @@ class DataConfig:
         keys = set(self.keys_to_load)
         keys.add(self.observation_key)
         keys.add(self.action_key)
+        if self.next_action_key is not None:
+            keys.add(self.next_action_key)
         if self.goal_key is not None:
             keys.add(self.goal_key)
         if self.policy_embedding_key is not None:
@@ -77,6 +80,12 @@ class ModelConfig:
     vector_field_hidden_dims: tuple[int, ...] = (256, 256)
     time_embed_dim: int = 256
     gamma: float = 0.99
+    direct_loss_weight: float | None = None
+    bootstrap_loss_weight: float | None = None
+    bootstrap_time_sampling: str = "uniform"
+    bootstrap_time_late_prob: float = 0.5
+    bootstrap_time_late_start: float = 0.9
+    initialization: str = "default"
     polyak: float | None = None
     ode_steps: int = 10
     time_eps: float = 1e-4
@@ -169,3 +178,11 @@ class TrainEntryConfig:
     observation_encoder: str = "auto"
     network_variant: str = "repo"
     policy_embedding_dim: int = 0
+    gamma: float = 0.99
+    polyak: float | None = None
+    direct_loss_weight: float | None = None
+    bootstrap_loss_weight: float | None = None
+    bootstrap_time_sampling: str = "uniform"
+    bootstrap_time_late_prob: float = 0.5
+    bootstrap_time_late_start: float = 0.9
+    initialization: str = "default"

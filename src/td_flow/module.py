@@ -16,11 +16,6 @@ def td2_cfm_forward(self: spt.Module, batch: dict, stage: str) -> dict:
     return self.td2_cfm.compute_state(batch, stage=stage)
 
 
-def td2_cfm_on_before_zero_grad(self: spt.Module, optimizer) -> None:
-    del optimizer
-    self.td2_cfm.update_targets()
-
-
 def _extract_scalar_metrics(state: dict[str, Any]) -> dict[str, torch.Tensor]:
     metrics: dict[str, torch.Tensor] = {}
     for key, value in state.items():
@@ -73,6 +68,7 @@ def td2_cfm_on_train_batch_end(
     batch_idx: int,
 ) -> None:
     del batch_idx
+    self.td2_cfm.update_targets()
     batch_size = int(batch["obs"].shape[0]) if isinstance(batch, dict) and "obs" in batch else 1
     _log_metrics(
         self,
@@ -140,7 +136,6 @@ def build_training_module(
         td2_cfm=td2_model,
         optim=optim_config,
     )
-    module.on_before_zero_grad = MethodType(td2_cfm_on_before_zero_grad, module)
     module.on_train_batch_end = MethodType(td2_cfm_on_train_batch_end, module)
     module.on_validation_batch_end = MethodType(td2_cfm_on_validation_batch_end, module)
     return module

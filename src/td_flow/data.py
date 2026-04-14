@@ -14,6 +14,45 @@ def _as_float_tensor(value: object) -> torch.Tensor:
     return torch.as_tensor(value, dtype=torch.float32)
 
 
+def compute_episode_lengths(terminals: object) -> list[int]:
+    terminal_tensor = _as_float_tensor(terminals).bool().flatten()
+    if terminal_tensor.numel() == 0:
+        return []
+
+    lengths: list[int] = []
+    current_length = 0
+    for is_terminal in terminal_tensor.tolist():
+        current_length += 1
+        if is_terminal:
+            lengths.append(current_length)
+            current_length = 0
+
+    if current_length > 0:
+        lengths.append(current_length)
+    return lengths
+
+
+def summarize_episode_lengths(terminals: object) -> dict[str, float | int]:
+    lengths = compute_episode_lengths(terminals)
+    if not lengths:
+        return {
+            "num_transitions": 0,
+            "num_episodes": 0,
+            "min_length": 0,
+            "max_length": 0,
+            "mean_length": 0.0,
+        }
+
+    total = sum(lengths)
+    return {
+        "num_transitions": total,
+        "num_episodes": len(lengths),
+        "min_length": min(lengths),
+        "max_length": max(lengths),
+        "mean_length": total / len(lengths),
+    }
+
+
 class OGBenchNPZDataset(Dataset):
     def __init__(
         self,
@@ -21,6 +60,7 @@ class OGBenchNPZDataset(Dataset):
         *,
         observation_key: str = "state",
         action_key: str = "action",
+        next_action_key: str | None = None,
         goal_key: str | None = None,
         policy_embedding_key: str | None = None,
         policy_embeddings: torch.Tensor | None = None,
@@ -28,6 +68,7 @@ class OGBenchNPZDataset(Dataset):
         self.dataset = dataset
         self.observation_key = observation_key
         self.action_key = action_key
+        self.next_action_key = next_action_key
         self.goal_key = goal_key
         self.policy_embedding_key = policy_embedding_key
         self.policy_embeddings = policy_embeddings
@@ -87,11 +128,14 @@ class OGBenchNPZDataset(Dataset):
         next_obs = self.next_observations[index]
         action = self.actions[index]
         next_actions = None
-        direct_next_action_key = f"next_{self.action_key}"
-        if direct_next_action_key in self.dataset:
-            next_actions = _as_float_tensor(self.dataset[direct_next_action_key])
-        elif "next_actions" in self.dataset:
-            next_actions = _as_float_tensor(self.dataset["next_actions"])
+        if self.next_action_key is not None and self.next_action_key in self.dataset:
+            next_actions = _as_float_tensor(self.dataset[self.next_action_key])
+        else:
+            direct_next_action_key = f"next_{self.action_key}"
+            if direct_next_action_key in self.dataset:
+                next_actions = _as_float_tensor(self.dataset[direct_next_action_key])
+            elif "next_actions" in self.dataset:
+                next_actions = _as_float_tensor(self.dataset["next_actions"])
 
         if next_actions is not None:
             next_action = next_actions[index]
@@ -127,12 +171,14 @@ class TD2CFMDataset(Dataset):
         *,
         observation_key: str = "state",
         action_key: str = "action",
+        next_action_key: str | None = None,
         goal_key: str | None = None,
         policy_embedding_key: str | None = None,
     ) -> None:
         self.dataset = dataset
         self.observation_key = observation_key
         self.action_key = action_key
+        self.next_action_key = next_action_key
         self.goal_key = goal_key
         self.policy_embedding_key = policy_embedding_key
 
@@ -152,6 +198,9 @@ class TD2CFMDataset(Dataset):
 
         if actions.shape[0] < 2:
             next_action = torch.zeros_like(actions[0])
+        elif self.next_action_key is not None and self.next_action_key in sample:
+            next_actions = _as_float_tensor(sample[self.next_action_key])
+            next_action = next_actions[1] if next_actions.ndim > 1 else next_actions
         else:
             next_action = actions[1]
 
@@ -192,6 +241,7 @@ def build_td2_hdf5_dataset(config: DataConfig) -> TD2CFMDataset:
         dataset,
         observation_key=base_config.observation_key,
         action_key=base_config.action_key,
+        next_action_key=base_config.next_action_key,
         goal_key=base_config.goal_key,
         policy_embedding_key=base_config.policy_embedding_key,
     )
@@ -216,6 +266,7 @@ def build_td2_ogbench_dataset(config: DataConfig) -> OGBenchNPZDataset:
         dataset,
         observation_key=config.observation_key,
         action_key=config.action_key,
+        next_action_key=config.next_action_key,
         goal_key=config.goal_key,
         policy_embedding_key=config.policy_embedding_key,
     )

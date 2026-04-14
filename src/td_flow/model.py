@@ -8,7 +8,12 @@ import stable_pretraining as spt
 
 from .config import BackboneConfig, ModelConfig, resolve_paper_polyak
 from .ode import midpoint_integrate
-from .paths import sample_linear_probability_path, sample_source, sample_time
+from .paths import (
+    sample_late_mixture_time,
+    sample_linear_probability_path,
+    sample_source,
+    sample_time,
+)
 from .target import clone_as_target, ema_update
 
 PAPER_SINGLE_WIDTH = 512
@@ -28,6 +33,14 @@ def _make_mlp(
         layers.extend([nn.Linear(in_dim, out_dim), activation()])
     layers.append(nn.Linear(dims[-2], dims[-1]))
     return nn.Sequential(*layers)
+
+
+def _apply_orthogonal_init(module: nn.Module) -> None:
+    for child in module.modules():
+        if isinstance(child, nn.Linear):
+            nn.init.orthogonal_(child.weight)
+            if child.bias is not None:
+                nn.init.zeros_(child.bias)
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -315,6 +328,9 @@ class TD2CFMModel(nn.Module):
             if cfg.polyak is not None
             else resolve_paper_polyak(cfg.policy_mode)
         )
+        self.initialization = cfg.initialization.lower()
+        if self.initialization not in {"default", "orthogonal"}:
+            raise ValueError("initialization must be one of: default, orthogonal")
 
         self.latent_dim = math.prod(cfg.observation_shape) if self.use_identity_encoder else cfg.latent_dim
         self.encoder = (
@@ -354,6 +370,11 @@ class TD2CFMModel(nn.Module):
                 hidden_dims=cfg.vector_field_hidden_dims,
             )
 
+        if self.initialization == "orthogonal":
+            _apply_orthogonal_init(self.encoder)
+            _apply_orthogonal_init(self.context_encoder)
+            _apply_orthogonal_init(self.vector_field)
+
         self.target_encoder = clone_as_target(self.encoder)
         self.target_context_encoder = clone_as_target(self.context_encoder)
         self.target_vector_field = clone_as_target(self.vector_field)
@@ -366,6 +387,41 @@ class TD2CFMModel(nn.Module):
         ema_update(self.target_encoder, self.encoder, self.target_polyak)
         ema_update(self.target_context_encoder, self.context_encoder, self.target_polyak)
         ema_update(self.target_vector_field, self.vector_field, self.target_polyak)
+
+    def loss_weights(self) -> tuple[float, float]:
+        direct_weight = self.cfg.direct_loss_weight
+        bootstrap_weight = self.cfg.bootstrap_loss_weight
+        if direct_weight is None and bootstrap_weight is None:
+            return 1.0 - self.cfg.gamma, self.cfg.gamma
+        if direct_weight is None or bootstrap_weight is None:
+            raise ValueError(
+                "direct_loss_weight and bootstrap_loss_weight must both be set or both be None."
+            )
+        if direct_weight < 0.0 or bootstrap_weight < 0.0:
+            raise ValueError("loss weights must be non-negative.")
+        if direct_weight == 0.0 and bootstrap_weight == 0.0:
+            raise ValueError("At least one loss weight must be positive.")
+        return float(direct_weight), float(bootstrap_weight)
+
+    def sample_bootstrap_time(self, batch_size: int, *, dtype: torch.dtype) -> torch.Tensor:
+        mode = self.cfg.bootstrap_time_sampling
+        if mode == "uniform":
+            return sample_time(
+                batch_size,
+                device=self.device,
+                dtype=dtype,
+                eps=self.cfg.time_eps,
+            )
+        if mode == "late_mixture":
+            return sample_late_mixture_time(
+                batch_size,
+                device=self.device,
+                dtype=dtype,
+                late_prob=self.cfg.bootstrap_time_late_prob,
+                late_start=self.cfg.bootstrap_time_late_start,
+                eps=self.cfg.time_eps,
+            )
+        raise ValueError(f"Unsupported bootstrap_time_sampling mode: {mode}")
 
     def encode_observation(self, observation: torch.Tensor, *, use_target: bool = False) -> torch.Tensor:
         encoder = self.target_encoder if use_target else self.encoder
@@ -473,11 +529,15 @@ class TD2CFMModel(nn.Module):
         state_latent = self.encode_observation(obs)
         next_latent_target = self.encode_observation(next_obs, use_target=True).detach()
 
-        t = sample_time(
+        direct_t = sample_time(
             obs.shape[0],
             device=self.device,
             dtype=state_latent.dtype,
             eps=self.cfg.time_eps,
+        )
+        bootstrap_t = self.sample_bootstrap_time(
+            obs.shape[0],
+            dtype=state_latent.dtype,
         )
         source = sample_source(
             obs.shape[0],
@@ -489,12 +549,12 @@ class TD2CFMModel(nn.Module):
         direct_xt, direct_target = sample_linear_probability_path(
             source,
             next_latent_target,
-            t,
+            direct_t,
             eps=self.cfg.time_eps,
         )
         direct_prediction = self.compute_velocity(
             direct_xt,
-            t,
+            direct_t,
             state_latent,
             action,
             policy_embedding,
@@ -505,12 +565,12 @@ class TD2CFMModel(nn.Module):
             next_latent_target,
             next_action,
             source,
-            t,
+            bootstrap_t,
             policy_embedding,
         )
         bootstrap_prediction = self.compute_velocity(
             bootstrap_xt,
-            t,
+            bootstrap_t,
             state_latent,
             action,
             policy_embedding,
@@ -519,12 +579,15 @@ class TD2CFMModel(nn.Module):
 
         direct_loss = torch.mean((direct_prediction - direct_target) ** 2)
         bootstrap_loss = torch.mean((bootstrap_prediction - bootstrap_target) ** 2)
-        loss = (1.0 - self.cfg.gamma) * direct_loss + self.cfg.gamma * bootstrap_loss
+        direct_weight, bootstrap_weight = self.loss_weights()
+        loss = direct_weight * direct_loss + bootstrap_weight * bootstrap_loss
 
         return {
             "loss": loss,
             "loss_direct": direct_loss.detach(),
             "loss_bootstrap": bootstrap_loss.detach(),
+            "loss_direct_weight": torch.tensor(direct_weight, device=self.device),
+            "loss_bootstrap_weight": torch.tensor(bootstrap_weight, device=self.device),
             "latent": state_latent.detach(),
             "latent_norm": state_latent.norm(dim=-1).mean().detach(),
             "vf_norm": direct_prediction.norm(dim=-1).mean().detach(),
