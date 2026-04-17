@@ -13,6 +13,7 @@ from .model import TD2CFMModel
 
 
 def td2_cfm_forward(self: spt.Module, batch: dict, stage: str) -> dict:
+    self.td2_cfm.set_loss_weight_step(self.global_step)
     return self.td2_cfm.compute_state(batch, stage=stage)
 
 

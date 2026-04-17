@@ -214,6 +214,34 @@ class ModelTest(unittest.TestCase):
         self.assertAlmostEqual(direct_weight, 0.1)
         self.assertAlmostEqual(bootstrap_weight, 0.9)
 
+    def test_loss_weights_direct_warmup_linear_schedule(self) -> None:
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                gamma=0.99,
+                loss_weight_schedule="direct_warmup_linear",
+                loss_weight_warmup_steps=10,
+                loss_weight_ramp_steps=20,
+            )
+        )
+
+        model.set_loss_weight_step(0)
+        self.assertEqual(model.loss_weights(), (1.0, 0.0))
+
+        model.set_loss_weight_step(10)
+        self.assertEqual(model.loss_weights(), (1.0, 0.0))
+
+        model.set_loss_weight_step(20)
+        direct_weight, bootstrap_weight = model.loss_weights()
+        self.assertAlmostEqual(direct_weight, 0.505)
+        self.assertAlmostEqual(bootstrap_weight, 0.495)
+
+        model.set_loss_weight_step(30)
+        direct_weight, bootstrap_weight = model.loss_weights()
+        self.assertAlmostEqual(direct_weight, 0.01)
+        self.assertAlmostEqual(bootstrap_weight, 0.99)
+
     def test_loss_weights_require_both_override_values(self) -> None:
         model = TD2CFMModel(
             ModelConfig(
@@ -225,6 +253,61 @@ class ModelTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             model.loss_weights()
+
+    def test_one_step_prediction_loss_contributes_to_total_loss(self) -> None:
+        batch = {
+            "obs": torch.randn(4, 4),
+            "next_obs": torch.randn(4, 4),
+            "action": torch.randn(4, 2),
+            "next_action": torch.randn(4, 2),
+        }
+
+        torch.manual_seed(0)
+        model_without_aux = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                one_step_prediction_loss_weight=0.0,
+            )
+        )
+        torch.manual_seed(123)
+        state_without_aux = model_without_aux.compute_state(batch, stage="fit")
+
+        torch.manual_seed(0)
+        model_with_aux = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                one_step_prediction_loss_weight=0.5,
+            )
+        )
+        torch.manual_seed(123)
+        state_with_aux = model_with_aux.compute_state(batch, stage="fit")
+
+        expected_loss = state_without_aux["loss"] + 0.5 * state_with_aux["loss_one_step_prediction"]
+        self.assertTrue(torch.allclose(state_with_aux["loss"], expected_loss, atol=1e-6))
+
+    def test_one_step_prediction_uses_action_when_conditioning_is_enabled(self) -> None:
+        torch.manual_seed(0)
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                one_step_prediction_loss_weight=1.0,
+            )
+        )
+
+        state_latent = torch.randn(5, 4)
+        action_a = torch.randn(5, 2)
+        action_b = torch.randn(5, 2)
+
+        prediction_a = model.predict_one_step_latent(state_latent, action_a)
+        prediction_b = model.predict_one_step_latent(state_latent, action_b)
+
+        self.assertFalse(torch.allclose(prediction_a, prediction_b))
 
     def test_orthogonal_initialization_zeroes_linear_biases(self) -> None:
         model = TD2CFMModel(
@@ -258,6 +341,51 @@ class ModelTest(unittest.TestCase):
 
         self.assertGreaterEqual(float((t >= 0.9).float().mean()), 0.45)
         self.assertGreaterEqual(float(t.min()), model.cfg.time_eps - 1e-7)
+
+    def test_state_only_conditioning_ignores_current_action_in_velocity(self) -> None:
+        torch.manual_seed(0)
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                state_only_conditioning=True,
+            )
+        )
+
+        x_t = torch.randn(5, 4)
+        t = torch.linspace(0.1, 0.9, 5)
+        state_latent = torch.randn(5, 4)
+        action_a = torch.randn(5, 2)
+        action_b = torch.randn(5, 2)
+
+        velocity_a = model.compute_velocity(x_t, t, state_latent, action_a)
+        velocity_b = model.compute_velocity(x_t, t, state_latent, action_b)
+
+        self.assertTrue(torch.allclose(velocity_a, velocity_b))
+
+    def test_state_only_conditioning_ignores_next_action_in_bootstrap_target(self) -> None:
+        torch.manual_seed(0)
+        model = TD2CFMModel(
+            ModelConfig(
+                observation_shape=(4,),
+                action_dim=2,
+                observation_encoder="identity",
+                state_only_conditioning=True,
+            )
+        )
+
+        next_latent = torch.randn(6, 4)
+        next_action_a = torch.randn(6, 2)
+        next_action_b = torch.randn(6, 2)
+        source = torch.randn(6, 4)
+        t = torch.linspace(0.1, 0.9, 6)
+
+        xt_a, target_a = model.bootstrap_target(next_latent, next_action_a, source, t)
+        xt_b, target_b = model.bootstrap_target(next_latent, next_action_b, source, t)
+
+        self.assertTrue(torch.allclose(xt_a, xt_b))
+        self.assertTrue(torch.allclose(target_a, target_b))
         self.assertLessEqual(float(t.max()), 1.0 - model.cfg.time_eps + 1e-7)
 
 

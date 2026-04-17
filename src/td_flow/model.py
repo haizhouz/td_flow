@@ -344,6 +344,7 @@ class TD2CFMModel(nn.Module):
         )
         if self.network_variant == "paper":
             paper_hidden_dim = _resolve_paper_hidden_dim(cfg.policy_mode)
+            self.context_dim = paper_hidden_dim
             self.context_encoder = PaperContextEncoder(
                 latent_dim=self.latent_dim,
                 action_dim=cfg.action_dim,
@@ -356,6 +357,7 @@ class TD2CFMModel(nn.Module):
                 hidden_dim=paper_hidden_dim,
             )
         else:
+            self.context_dim = cfg.context_dim
             self.context_encoder = ContextEncoder(
                 latent_dim=self.latent_dim,
                 action_dim=cfg.action_dim,
@@ -369,15 +371,22 @@ class TD2CFMModel(nn.Module):
                 time_embed_dim=cfg.time_embed_dim,
                 hidden_dims=cfg.vector_field_hidden_dims,
             )
+        self.one_step_head = _make_mlp(
+            self.context_dim,
+            (self.context_dim,),
+            self.latent_dim,
+        )
 
         if self.initialization == "orthogonal":
             _apply_orthogonal_init(self.encoder)
             _apply_orthogonal_init(self.context_encoder)
             _apply_orthogonal_init(self.vector_field)
+            _apply_orthogonal_init(self.one_step_head)
 
         self.target_encoder = clone_as_target(self.encoder)
         self.target_context_encoder = clone_as_target(self.context_encoder)
         self.target_vector_field = clone_as_target(self.vector_field)
+        self.loss_weight_step = 0
 
     @property
     def device(self) -> torch.device:
@@ -388,7 +397,7 @@ class TD2CFMModel(nn.Module):
         ema_update(self.target_context_encoder, self.context_encoder, self.target_polyak)
         ema_update(self.target_vector_field, self.vector_field, self.target_polyak)
 
-    def loss_weights(self) -> tuple[float, float]:
+    def base_loss_weights(self) -> tuple[float, float]:
         direct_weight = self.cfg.direct_loss_weight
         bootstrap_weight = self.cfg.bootstrap_loss_weight
         if direct_weight is None and bootstrap_weight is None:
@@ -401,6 +410,32 @@ class TD2CFMModel(nn.Module):
             raise ValueError("loss weights must be non-negative.")
         if direct_weight == 0.0 and bootstrap_weight == 0.0:
             raise ValueError("At least one loss weight must be positive.")
+        return float(direct_weight), float(bootstrap_weight)
+
+    def set_loss_weight_step(self, step: int) -> None:
+        self.loss_weight_step = max(int(step), 0)
+
+    def loss_weights(self) -> tuple[float, float]:
+        target_direct, target_bootstrap = self.base_loss_weights()
+        schedule = self.cfg.loss_weight_schedule
+        if schedule == "constant":
+            return target_direct, target_bootstrap
+        if schedule != "direct_warmup_linear":
+            raise ValueError(f"Unsupported loss_weight_schedule: {schedule}")
+
+        warmup_steps = self.cfg.loss_weight_warmup_steps
+        ramp_steps = self.cfg.loss_weight_ramp_steps
+        if warmup_steps < 0 or ramp_steps < 0:
+            raise ValueError("loss_weight_warmup_steps and loss_weight_ramp_steps must be non-negative.")
+
+        if self.loss_weight_step < warmup_steps:
+            return 1.0, 0.0
+        if ramp_steps == 0:
+            return target_direct, target_bootstrap
+
+        ramp_progress = min(max(self.loss_weight_step - warmup_steps, 0), ramp_steps) / float(ramp_steps)
+        direct_weight = (1.0 - ramp_progress) * 1.0 + ramp_progress * target_direct
+        bootstrap_weight = ramp_progress * target_bootstrap
         return float(direct_weight), float(bootstrap_weight)
 
     def sample_bootstrap_time(self, batch_size: int, *, dtype: torch.dtype) -> torch.Tensor:
@@ -427,6 +462,11 @@ class TD2CFMModel(nn.Module):
         encoder = self.target_encoder if use_target else self.encoder
         return encoder(observation)
 
+    def conditioning_action(self, action: torch.Tensor) -> torch.Tensor:
+        if not self.cfg.state_only_conditioning:
+            return action
+        return torch.zeros_like(action)
+
     def encode_context(
         self,
         state_latent: torch.Tensor,
@@ -440,7 +480,8 @@ class TD2CFMModel(nn.Module):
                 "policy_embedding is required when policy_embedding_dim > 0."
             )
         context_encoder = self.target_context_encoder if use_target else self.context_encoder
-        return context_encoder(state_latent, action, policy_embedding)
+        conditioned_action = self.conditioning_action(action)
+        return context_encoder(state_latent, conditioned_action, policy_embedding)
 
     def compute_velocity(
         self,
@@ -460,6 +501,20 @@ class TD2CFMModel(nn.Module):
         )
         vector_field = self.target_vector_field if use_target else self.vector_field
         return vector_field(x_t, t, context)
+
+    def predict_one_step_latent(
+        self,
+        state_latent: torch.Tensor,
+        action: torch.Tensor,
+        policy_embedding: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        context = self.encode_context(
+            state_latent,
+            action,
+            policy_embedding,
+            use_target=False,
+        )
+        return self.one_step_head(context)
 
     def bootstrap_target(
         self,
@@ -576,19 +631,35 @@ class TD2CFMModel(nn.Module):
             policy_embedding,
             use_target=False,
         )
+        next_latent_prediction = self.predict_one_step_latent(
+            state_latent,
+            action,
+            policy_embedding,
+        )
 
         direct_loss = torch.mean((direct_prediction - direct_target) ** 2)
         bootstrap_loss = torch.mean((bootstrap_prediction - bootstrap_target) ** 2)
+        one_step_prediction_loss = torch.mean((next_latent_prediction - next_latent_target) ** 2)
         direct_weight, bootstrap_weight = self.loss_weights()
-        loss = direct_weight * direct_loss + bootstrap_weight * bootstrap_loss
+        loss = (
+            direct_weight * direct_loss
+            + bootstrap_weight * bootstrap_loss
+            + self.cfg.one_step_prediction_loss_weight * one_step_prediction_loss
+        )
 
         return {
             "loss": loss,
             "loss_direct": direct_loss.detach(),
             "loss_bootstrap": bootstrap_loss.detach(),
+            "loss_one_step_prediction": one_step_prediction_loss.detach(),
             "loss_direct_weight": torch.tensor(direct_weight, device=self.device),
             "loss_bootstrap_weight": torch.tensor(bootstrap_weight, device=self.device),
+            "loss_one_step_prediction_weight": torch.tensor(
+                self.cfg.one_step_prediction_loss_weight,
+                device=self.device,
+            ),
             "latent": state_latent.detach(),
             "latent_norm": state_latent.norm(dim=-1).mean().detach(),
             "vf_norm": direct_prediction.norm(dim=-1).mean().detach(),
+            "one_step_prediction_norm": next_latent_prediction.norm(dim=-1).mean().detach(),
         }

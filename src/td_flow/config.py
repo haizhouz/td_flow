@@ -70,6 +70,7 @@ class DataConfig:
 class ModelConfig:
     observation_shape: tuple[int, ...]
     action_dim: int
+    state_only_conditioning: bool = False
     backbone: BackboneConfig = field(default_factory=BackboneConfig)
     observation_encoder: str = "auto"
     network_variant: str = "repo"
@@ -82,6 +83,10 @@ class ModelConfig:
     gamma: float = 0.99
     direct_loss_weight: float | None = None
     bootstrap_loss_weight: float | None = None
+    one_step_prediction_loss_weight: float = 0.0
+    loss_weight_schedule: str = "constant"
+    loss_weight_warmup_steps: int = 0
+    loss_weight_ramp_steps: int = 0
     bootstrap_time_sampling: str = "uniform"
     bootstrap_time_late_prob: float = 0.5
     bootstrap_time_late_start: float = 0.9
@@ -175,6 +180,7 @@ class TrainEntryConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     backbone: BackboneConfig = field(default_factory=BackboneConfig)
     policy_mode: str = "single_policy"
+    state_only_conditioning: bool = False
     observation_encoder: str = "auto"
     network_variant: str = "repo"
     policy_embedding_dim: int = 0
@@ -182,6 +188,10 @@ class TrainEntryConfig:
     polyak: float | None = None
     direct_loss_weight: float | None = None
     bootstrap_loss_weight: float | None = None
+    one_step_prediction_loss_weight: float = 0.0
+    loss_weight_schedule: str = "constant"
+    loss_weight_warmup_steps: int = 0
+    loss_weight_ramp_steps: int = 0
     bootstrap_time_sampling: str = "uniform"
     bootstrap_time_late_prob: float = 0.5
     bootstrap_time_late_start: float = 0.9

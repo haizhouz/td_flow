@@ -633,6 +633,7 @@ def build_project_config_from_sample(
     model_config = ModelConfig(
         observation_shape=observation_shape,
         action_dim=action_dim,
+        state_only_conditioning=entry_config.state_only_conditioning,
         backbone=entry_config.backbone,
         observation_encoder=entry_config.observation_encoder,
         network_variant=entry_config.network_variant,
@@ -642,6 +643,10 @@ def build_project_config_from_sample(
         polyak=entry_config.polyak,
         direct_loss_weight=entry_config.direct_loss_weight,
         bootstrap_loss_weight=entry_config.bootstrap_loss_weight,
+        one_step_prediction_loss_weight=entry_config.one_step_prediction_loss_weight,
+        loss_weight_schedule=entry_config.loss_weight_schedule,
+        loss_weight_warmup_steps=entry_config.loss_weight_warmup_steps,
+        loss_weight_ramp_steps=entry_config.loss_weight_ramp_steps,
         bootstrap_time_sampling=entry_config.bootstrap_time_sampling,
         bootstrap_time_late_prob=entry_config.bootstrap_time_late_prob,
         bootstrap_time_late_start=entry_config.bootstrap_time_late_start,
