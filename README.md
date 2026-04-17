@@ -182,6 +182,97 @@ uv run python -m td_flow.toy.generate_circle_policy_dataset --help
 uv run python -m td_flow.toy.plot_circle_policy_conditioned_occupancy --help
 ```
 
+Pointmass helpers now also cover mixed loop-path datasets and off-policy diagnostics:
+
+```bash
+uv run python -m td_flow.pointmass.generate_policy_dataset --help
+uv run python -m td_flow.pointmass.compare_bootstrap_target_occupancy --help
+uv run python -m td_flow.pointmass.compare_action_conditioned_successors --help
+```
+
+`td_flow.pointmass.generate_policy_dataset` supports multiple scripted path modes per episode. For example, the current mixed dataset can alternate between the straight/diamond loop and the circular loop and stores the per-step mode in `policy_mode_id`.
+
+Toy-circle helpers now include an exploration/off-policy benchmark with exact successor-measure references:
+
+```bash
+uv run python -m td_flow.toy.generate_circle_exploration_dataset --help
+uv run python -m td_flow.toy.plot_circle_exploration_exact_comparison --help
+uv run python -m td_flow.toy.measure_circle_density_metrics --help
+```
+
+`td_flow.toy.generate_circle_exploration_dataset` writes:
+
+- `action`: behavior-policy action
+- `policy_action`: target-policy action
+- metadata JSON with explicit `behavior_policy` and `target_policy`
+
+Supported behavior policies are:
+
+- `uniform_random`
+- `disjoint_uniform`
+- `constant_delta_theta`
+
+The exact toy comparison script evaluates:
+
+- dataset-only models against exact `m^mu`
+- off-policy models against exact `m^pi`
+
+The density-metric script complements the support-style nearest-neighbor metric with angle-histogram total variation, which is the right diagnostic when two policies share the same circle support but induce different discounted densities.
+
+### Toy Off-Policy Example
+
+Generate a toy exploration dataset with a fixed behavior policy and relabeled target policy:
+
+```bash
+uv run python -m td_flow.toy.generate_circle_exploration_dataset \
+  --output-hdf5-path data/stablewm_cache/toy-circle-exorl-opposite-policy.h5 \
+  --behavior-policy-kind constant_delta_theta \
+  --behavior-delta-theta -0.02 \
+  --policy-delta-theta 0.02 \
+  --overwrite
+```
+
+Train a dataset-only model:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name toy-circle-exorl-opposite-policy \
+  --data.backend stablewm_hdf5 \
+  --data.dir /home/haizhou/Documents/td_flow/data/stablewm_cache \
+  --data.observation-key observation \
+  --data.action-key action \
+  --data.next-action-key action \
+  --observation-encoder identity \
+  --network-variant paper \
+  --gamma 0.99
+```
+
+Train an off-policy model on the same dataset:
+
+```bash
+uv run python -m td_flow.train \
+  --data.dataset-name toy-circle-exorl-opposite-policy \
+  --data.backend stablewm_hdf5 \
+  --data.dir /home/haizhou/Documents/td_flow/data/stablewm_cache \
+  --data.observation-key observation \
+  --data.action-key action \
+  --data.next-action-key policy_action \
+  --observation-encoder identity \
+  --network-variant paper \
+  --gamma 0.99
+```
+
+Compare both checkpoints against exact toy successor measures:
+
+```bash
+uv run python -m td_flow.toy.plot_circle_exploration_exact_comparison \
+  --dataset-only-checkpoint-path outputs/toy-circle-dataset/checkpoints/last.ckpt \
+  --offpolicy-checkpoint-path outputs/toy-circle-offpolicy/checkpoints/last.ckpt
+uv run python -m td_flow.toy.measure_circle_density_metrics \
+  --dataset-only-checkpoint-path outputs/toy-circle-dataset/checkpoints/last.ckpt \
+  --offpolicy-checkpoint-path outputs/toy-circle-offpolicy/checkpoints/last.ckpt
+```
+
 Fresh runs always use a timestamped run name. If you do not set `--train.run-name`, the base name is the dataset name and the final run looks like `cube-single-play-v0-20260409-210000`. If you set `--train.run-name cube-single-smoke`, the final run name becomes `cube-single-smoke-20260409-210000`.
 
 Resume a run from the latest checkpoint:

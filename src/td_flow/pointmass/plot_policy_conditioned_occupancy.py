@@ -49,6 +49,7 @@ class PointMassPolicyConditionedOccupancyConfig:
     seed: int = 0
     output_path: str | None = None
     use_dataset_initial_action: bool = False
+    baseline_mode: str = "auto"
     compile_policy: bool = False
     policy: PointMassLoopPolicyConfig = PointMassLoopPolicyConfig()
 
@@ -270,6 +271,33 @@ def _sample_discounted_positions(
     return trajectory_positions[sampled_indices]
 
 
+def _episode_index_for_step(ep_offset: np.ndarray, step_index: int) -> int:
+    return int(np.searchsorted(ep_offset, step_index, side="right") - 1)
+
+
+def _dataset_future_positions(
+    observations,
+    ep_offset: np.ndarray,
+    ep_len: np.ndarray,
+    start_index: int,
+) -> np.ndarray:
+    episode_index = _episode_index_for_step(ep_offset, start_index)
+    episode_start = int(ep_offset[episode_index])
+    local_index = int(start_index - episode_start)
+    remaining = int(ep_len[episode_index]) - local_index
+    return np.asarray(observations[start_index : start_index + remaining, :2], dtype=np.float32)
+
+
+def _resolve_baseline_mode(project_config, requested_mode: str) -> str:
+    if requested_mode == "auto":
+        if project_config.data.next_action_key == project_config.data.action_key:
+            return "dataset_episode"
+        return "scripted_policy"
+    if requested_mode not in {"scripted_policy", "dataset_episode"}:
+        raise ValueError("baseline_mode must be one of: auto, scripted_policy, dataset_episode")
+    return requested_mode
+
+
 @torch.no_grad()
 def _sample_model_positions(
     model,
@@ -336,8 +364,11 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
     with h5py.File(dataset_path, "r") as handle:
         observations = handle[project_config.data.observation_key]
         actions = handle[project_config.data.action_key]
+        ep_offset = np.asarray(handle["ep_offset"], dtype=np.int64)
+        ep_len = np.asarray(handle["ep_len"], dtype=np.int64)
         physics_states = handle["physics"] if "physics" in handle else None
         start_indices = _sample_random_indices(len(observations), config.num_states, config.seed)
+        baseline_mode = _resolve_baseline_mode(project_config, config.baseline_mode)
 
         fig, axes = plt.subplots(
             2,
@@ -350,11 +381,12 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
             "checkpoint_path": str(Path(config.checkpoint_path).resolve()),
             "dataset_path": str(dataset_path.resolve()),
             "gamma": gamma,
-            "conditioning": (
+            "conditioning": "dataset_action_then_dataset_episode" if baseline_mode == "dataset_episode" else (
                 "dataset_initial_action_then_noisy_policy_rollout"
                 if config.use_dataset_initial_action
                 else "shared_noisy_initial_action_then_noisy_policy_rollout"
             ),
+            "baseline_mode": baseline_mode,
             "num_states": config.num_states,
             "sample_count": config.sample_count,
             "sample_batch_size": config.sample_batch_size,
@@ -372,7 +404,7 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
         for column, start_index in enumerate(start_indices.tolist()):
             observation = np.asarray(observations[start_index], dtype=np.float32)
             physics_state = None if physics_states is None else np.asarray(physics_states[start_index], dtype=np.float64)
-            if config.use_dataset_initial_action:
+            if baseline_mode == "dataset_episode" or config.use_dataset_initial_action:
                 conditioning_action_tensor = _dataset_action_tensor(
                     actions,
                     start_index,
@@ -394,20 +426,34 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
                 sample_count=config.sample_count,
                 batch_size=config.sample_batch_size,
             )
-            rollout_positions = _sample_stochastic_rollout_positions(
-                env,
-                observation,
-                physics_state,
-                rollout_steps=config.rollout_steps,
-                rollout_count=config.stochastic_rollouts,
-                policy=policy,
-                device=device,
-                initial_action=action,
-                max_noise_fraction=config.rollout_max_noise_fraction,
-                gamma=gamma,
-                sample_count=config.sample_count,
-                seed=config.seed + column,
-            )
+            if baseline_mode == "dataset_episode":
+                trajectory_positions = _dataset_future_positions(
+                    observations,
+                    ep_offset,
+                    ep_len,
+                    start_index,
+                )
+                rollout_positions = _sample_discounted_positions(
+                    trajectory_positions,
+                    gamma=gamma,
+                    sample_count=config.sample_count,
+                    seed=config.seed + column,
+                )
+            else:
+                rollout_positions = _sample_stochastic_rollout_positions(
+                    env,
+                    observation,
+                    physics_state,
+                    rollout_steps=config.rollout_steps,
+                    rollout_count=config.stochastic_rollouts,
+                    policy=policy,
+                    device=device,
+                    initial_action=action,
+                    max_noise_fraction=config.rollout_max_noise_fraction,
+                    gamma=gamma,
+                    sample_count=config.sample_count,
+                    seed=config.seed + column,
+                )
 
             _plot_occupancy_cell(axes[0][column], model_positions, observation[:2])
             axes[0][column].set_title(
@@ -430,14 +476,24 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
 
         axes[0][0].set_ylabel("TD-Flow\npolicy-conditioned", fontsize=11)
         axes[1][0].set_ylabel(
-            "Logged-a then noisy\npolicy rollout" if config.use_dataset_initial_action else "Shared-a noisy policy\nrollout",
+            "Logged dataset\nepisode continuation"
+            if baseline_mode == "dataset_episode"
+            else (
+                "Logged-a then noisy\npolicy rollout"
+                if config.use_dataset_initial_action
+                else "Shared-a noisy policy\nrollout"
+            ),
             fontsize=11,
         )
         fig.suptitle(
             (
-                f"PointMass Policy-Conditioned Samples vs Logged-a Then Noisy Rollout (gamma={gamma:.2f})"
-                if config.use_dataset_initial_action
-                else f"PointMass Policy-Conditioned Samples vs Shared-a Noisy Rollout (gamma={gamma:.2f})"
+                f"PointMass Policy-Conditioned Samples vs Logged Dataset Continuation (gamma={gamma:.2f})"
+                if baseline_mode == "dataset_episode"
+                else (
+                    f"PointMass Policy-Conditioned Samples vs Logged-a Then Noisy Rollout (gamma={gamma:.2f})"
+                    if config.use_dataset_initial_action
+                    else f"PointMass Policy-Conditioned Samples vs Shared-a Noisy Rollout (gamma={gamma:.2f})"
+                )
             ),
             fontsize=14,
             y=0.98,

@@ -84,7 +84,18 @@ def load_td2_model(ckpt_path: str, project_config: ProjectConfig, device: torch.
         for key, value in checkpoint["state_dict"].items()
         if key.startswith("td2_cfm.")
     }
-    model.load_state_dict(state_dict, strict=True)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    missing_keys = list(incompatible.missing_keys)
+    unexpected_keys = list(incompatible.unexpected_keys)
+    allowed_missing_prefixes = ("one_step_head.",)
+    disallowed_missing = [
+        key for key in missing_keys if not key.startswith(allowed_missing_prefixes)
+    ]
+    if disallowed_missing or unexpected_keys:
+        raise RuntimeError(
+            "Checkpoint is incompatible with the current TD2CFMModel: "
+            f"missing_keys={disallowed_missing}, unexpected_keys={unexpected_keys}"
+        )
     model.eval()
     return model
 

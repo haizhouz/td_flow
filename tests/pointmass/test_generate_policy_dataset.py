@@ -57,6 +57,7 @@ class GeneratePointMassPolicyDatasetTests(unittest.TestCase):
                 output_hdf5_path=str(output_path),
                 num_episodes=2,
                 episode_length=3,
+                episode_modes=("straight", "circle"),
             )
             with mock.patch(
                 "td_flow.pointmass.generate_policy_dataset._load_pointmass_module",
@@ -70,8 +71,13 @@ class GeneratePointMassPolicyDatasetTests(unittest.TestCase):
                 self.assertEqual(handle["reward"].shape, (6, 1))
                 self.assertEqual(handle["discount"].shape, (6, 1))
                 self.assertEqual(handle["physics"].shape, (6, 4))
+                self.assertEqual(handle["policy_mode_id"].shape, (6, 1))
                 np.testing.assert_array_equal(handle["ep_len"][:], np.array([3, 3], dtype=np.int64))
                 np.testing.assert_array_equal(handle["ep_offset"][:], np.array([0, 3], dtype=np.int64))
+                np.testing.assert_array_equal(
+                    handle["policy_mode_id"][:].reshape(-1),
+                    np.array([0, 0, 0, 1, 1, 1], dtype=np.int64),
+                )
 
 
 if __name__ == "__main__":

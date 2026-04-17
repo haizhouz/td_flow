@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import h5py
 import numpy as np
 import tyro
 
-from .loop_policy import PointMassLoopPolicyConfig, scripted_pointmass_loop_action
+from .loop_policy import (
+    PointMassCirclePolicyConfig,
+    PointMassLoopPolicyConfig,
+    scripted_pointmass_action,
+)
 
 
 DEFAULT_DNC_ROOT = "/home/haizhou/Documents/DnC-FBr"
@@ -24,7 +28,11 @@ class GeneratePointMassPolicyDatasetConfig:
     seed: int = 0
     overwrite: bool = False
     include_physics: bool = True
-    policy: PointMassLoopPolicyConfig = PointMassLoopPolicyConfig()
+    episode_modes: tuple[str, ...] = ("straight", "circle")
+    mode_schedule: str = "alternate"
+    store_mode_ids: bool = True
+    loop_policy: PointMassLoopPolicyConfig = field(default_factory=PointMassLoopPolicyConfig)
+    circle_policy: PointMassCirclePolicyConfig = field(default_factory=PointMassCirclePolicyConfig)
 
 
 def _load_pointmass_module(dnc_root: str):
@@ -33,6 +41,24 @@ def _load_pointmass_module(dnc_root: str):
     from metamotivo.envs.dmc_tasks import pointmass
 
     return pointmass
+
+
+def _resolve_episode_mode(
+    config: GeneratePointMassPolicyDatasetConfig,
+    *,
+    episode_index: int,
+    rng: np.random.Generator,
+) -> str:
+    if len(config.episode_modes) == 0:
+        raise ValueError("episode_modes must contain at least one policy mode.")
+    for mode in config.episode_modes:
+        if mode not in {"loop", "straight", "circle"}:
+            raise ValueError(f"Unsupported episode mode: {mode}")
+    if config.mode_schedule == "alternate":
+        return str(config.episode_modes[episode_index % len(config.episode_modes)])
+    if config.mode_schedule == "random":
+        return str(rng.choice(np.asarray(config.episode_modes, dtype=object)))
+    raise ValueError("mode_schedule must be one of: alternate, random")
 
 
 def generate_pointmass_policy_dataset(config: GeneratePointMassPolicyDatasetConfig) -> Path:
@@ -49,22 +75,33 @@ def generate_pointmass_policy_dataset(config: GeneratePointMassPolicyDatasetConf
     reward_buffer = np.zeros((total_steps, 1), dtype=np.float32)
     discount_buffer = np.ones((total_steps, 1), dtype=np.float32)
     physics_buffer = np.zeros((total_steps, 4), dtype=np.float32) if config.include_physics else None
+    mode_id_buffer = np.zeros((total_steps, 1), dtype=np.int64) if config.store_mode_ids else None
     ep_len = np.full(config.num_episodes, config.episode_length, dtype=np.int64)
     ep_offset = np.arange(config.num_episodes, dtype=np.int64) * config.episode_length
 
     cursor = 0
     returns: list[float] = []
+    mode_to_id = {mode: mode_id for mode_id, mode in enumerate(config.episode_modes)}
+    episode_mode_counts = {mode: 0 for mode in config.episode_modes}
+    rng = np.random.default_rng(config.seed)
     for episode_index in range(config.num_episodes):
         env = pointmass.loop(
             random=config.seed + episode_index,
             environment_kwargs=dict(flat_observation=True),
         )
+        episode_mode = _resolve_episode_mode(config, episode_index=episode_index, rng=rng)
+        episode_mode_counts[episode_mode] += 1
         time_step = env.reset()
         episode_return = 0.0
 
         for step_index in range(config.episode_length):
             observation = np.asarray(time_step.observation["observations"], dtype=np.float32)
-            action = scripted_pointmass_loop_action(observation, config=config.policy)
+            action = scripted_pointmass_action(
+                observation,
+                mode=episode_mode,
+                loop_config=config.loop_policy,
+                circle_config=config.circle_policy,
+            )
 
             observation_buffer[cursor] = observation
             action_buffer[cursor] = action
@@ -72,6 +109,8 @@ def generate_pointmass_policy_dataset(config: GeneratePointMassPolicyDatasetConf
             discount_buffer[cursor, 0] = 1.0 if time_step.discount is None else float(time_step.discount)
             if physics_buffer is not None:
                 physics_buffer[cursor] = np.asarray(env.physics.get_state(), dtype=np.float32)
+            if mode_id_buffer is not None:
+                mode_id_buffer[cursor, 0] = mode_to_id[episode_mode]
             cursor += 1
 
             if step_index + 1 < config.episode_length:
@@ -87,6 +126,8 @@ def generate_pointmass_policy_dataset(config: GeneratePointMassPolicyDatasetConf
         handle.create_dataset("discount", data=discount_buffer)
         if physics_buffer is not None:
             handle.create_dataset("physics", data=physics_buffer)
+        if mode_id_buffer is not None:
+            handle.create_dataset("policy_mode_id", data=mode_id_buffer)
         handle.create_dataset("ep_len", data=ep_len)
         handle.create_dataset("ep_offset", data=ep_offset)
 
@@ -96,7 +137,12 @@ def generate_pointmass_policy_dataset(config: GeneratePointMassPolicyDatasetConf
         "episode_length": config.episode_length,
         "seed": config.seed,
         "include_physics": config.include_physics,
-        "policy": asdict(config.policy),
+        "episode_modes": list(config.episode_modes),
+        "mode_schedule": config.mode_schedule,
+        "episode_mode_counts": episode_mode_counts,
+        "store_mode_ids": config.store_mode_ids,
+        "loop_policy": asdict(config.loop_policy),
+        "circle_policy": asdict(config.circle_policy),
         "mean_return": float(np.mean(returns)),
         "std_return": float(np.std(returns)),
         "min_return": float(np.min(returns)),

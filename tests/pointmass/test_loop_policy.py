@@ -6,11 +6,15 @@ import numpy as np
 import torch
 
 from td_flow.pointmass.loop_policy import (
+    PointMassCirclePolicyConfig,
     PointMassLoopPolicyConfig,
+    circle_tangent,
+    desired_circle_velocity,
     TorchPointMassLoopScriptedPolicy,
     desired_loop_velocity,
     loop_outward_normal,
     loop_tangent,
+    scripted_pointmass_circle_action,
     scripted_pointmass_loop_action,
     torch_scripted_pointmass_loop_action,
 )
@@ -38,9 +42,30 @@ class PointMassLoopPolicyTests(unittest.TestCase):
             atol=1e-6,
         )
 
+    def test_circle_tangent_matches_clockwise_circle_direction(self) -> None:
+        np.testing.assert_allclose(circle_tangent(0.24, 0.0), np.array([0.0, -1.0], dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(circle_tangent(0.0, 0.24), np.array([1.0, 0.0], dtype=np.float32), atol=1e-6)
+
+    def test_desired_circle_velocity_is_tangent_on_nominal_circle(self) -> None:
+        config = PointMassCirclePolicyConfig(radius=0.24, target_speed=0.10, radial_gain=1.0)
+        observation = np.array([0.24, 0.0, 0.0, 0.0], dtype=np.float32)
+        np.testing.assert_allclose(
+            desired_circle_velocity(observation, config=config),
+            np.array([0.0, -0.10], dtype=np.float32),
+            atol=1e-6,
+        )
+
     def test_action_is_clipped_and_two_dimensional(self) -> None:
         observation = np.array([-0.29, 0.29, -2.0, 2.0], dtype=np.float32)
         action = scripted_pointmass_loop_action(observation)
+        self.assertEqual(action.shape, (2,))
+        self.assertTrue(np.all(np.isfinite(action)))
+        self.assertTrue(np.all(action <= 1.0))
+        self.assertTrue(np.all(action >= -1.0))
+
+    def test_circle_action_is_clipped_and_two_dimensional(self) -> None:
+        observation = np.array([0.29, 0.0, -2.0, 2.0], dtype=np.float32)
+        action = scripted_pointmass_circle_action(observation)
         self.assertEqual(action.shape, (2,))
         self.assertTrue(np.all(np.isfinite(action)))
         self.assertTrue(np.all(action <= 1.0))

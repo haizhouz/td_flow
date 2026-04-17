@@ -179,6 +179,16 @@ def _build_raw_to_clip_index(
 
 
 @torch.no_grad()
+def _random_derangement(length: int, *, device: torch.device) -> torch.Tensor:
+    if length < 2:
+        raise ValueError("derangement requires length >= 2")
+    while True:
+        perm = torch.randperm(length, device=device)
+        if not torch.any(perm == torch.arange(length, device=device)):
+            return perm
+
+
+@torch.no_grad()
 def _td2_target_sensitivity_metrics(model, batch: dict[str, torch.Tensor]) -> dict[str, float]:
     obs = batch["obs"].to(model.device).float()
     action = batch["action"].to(model.device).float()
@@ -190,7 +200,7 @@ def _td2_target_sensitivity_metrics(model, batch: dict[str, torch.Tensor]) -> di
     t = sample_time(obs.shape[0], device=model.device, dtype=state_latent.dtype, eps=model.cfg.time_eps)
     source = sample_source(obs.shape[0], model.latent_dim, device=model.device, dtype=state_latent.dtype)
 
-    perm = torch.randperm(obs.shape[0], device=model.device)
+    perm = _random_derangement(obs.shape[0], device=model.device)
     zero_action = torch.zeros_like(action)
     zero_next_action = torch.zeros_like(next_action)
 

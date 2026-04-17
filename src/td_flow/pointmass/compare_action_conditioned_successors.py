@@ -46,6 +46,7 @@ class CompareActionConditionedSuccessorsConfig:
     sample_batch_size: int = 1024
     seed: int = 0
     output_path: str | None = None
+    baseline_mode: str = "auto"
     compile_policy: bool = False
     policy: PointMassLoopPolicyConfig = PointMassLoopPolicyConfig()
 
@@ -152,6 +153,35 @@ def _action_variants(dataset_action: np.ndarray, policy_action: np.ndarray) -> l
     return variants
 
 
+def _resolve_baseline_mode(project_config, requested_mode: str) -> str:
+    if requested_mode == "auto":
+        if project_config.data.next_action_key == project_config.data.action_key:
+            return "dataset_episode"
+        return "scripted_policy"
+    if requested_mode not in {"scripted_policy", "dataset_episode"}:
+        raise ValueError("baseline_mode must be one of: auto, scripted_policy, dataset_episode")
+    return requested_mode
+
+
+def _episode_index_for_step(ep_offset: np.ndarray, step_index: int) -> int:
+    return int(np.searchsorted(ep_offset, step_index, side="right") - 1)
+
+
+def _dataset_trajectory_after_index(
+    observations,
+    ep_offset: np.ndarray,
+    ep_len: np.ndarray,
+    start_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    episode_index = _episode_index_for_step(ep_offset, start_index)
+    episode_start = int(ep_offset[episode_index])
+    local_index = int(start_index - episode_start)
+    remaining = int(ep_len[episode_index]) - local_index
+    trajectory = np.asarray(observations[start_index + 1 : start_index + remaining], dtype=np.float32)
+    next_xy = np.asarray(observations[start_index + 1, :2], dtype=np.float32)
+    return trajectory[:, :2], next_xy
+
+
 def compare_action_conditioned_successors(config: CompareActionConditionedSuccessorsConfig) -> Path:
     run_dir = _checkpoint_run_dir(config.checkpoint_path)
     project_config = load_project_config_from_run_dir(run_dir)
@@ -180,6 +210,8 @@ def compare_action_conditioned_successors(config: CompareActionConditionedSucces
     with h5py.File(dataset_path, "r") as handle:
         observations = handle[project_config.data.observation_key]
         actions = handle[project_config.data.action_key]
+        ep_offset = np.asarray(handle["ep_offset"], dtype=np.int64)
+        ep_len = np.asarray(handle["ep_len"], dtype=np.int64)
         physics_states = handle["physics"] if "physics" in handle else None
         if not (0 <= config.start_index < len(observations)):
             raise ValueError(f"start_index={config.start_index} out of bounds for dataset of size {len(observations)}")
@@ -188,7 +220,8 @@ def compare_action_conditioned_successors(config: CompareActionConditionedSucces
         physics_state = None if physics_states is None else np.asarray(physics_states[config.start_index], dtype=np.float64)
         dataset_action = np.asarray(actions[config.start_index], dtype=np.float32)
         policy_action = _policy_action(policy, observation, device=device)
-        action_variants = _action_variants(dataset_action, policy_action)
+        baseline_mode = _resolve_baseline_mode(project_config, config.baseline_mode)
+        action_variants = [("dataset", dataset_action.astype(np.float32, copy=False))] if baseline_mode == "dataset_episode" else _action_variants(dataset_action, policy_action)
 
         fig, axes = plt.subplots(
             2,
@@ -213,6 +246,7 @@ def compare_action_conditioned_successors(config: CompareActionConditionedSucces
             "seed": int(config.seed),
             "device": str(device),
             "policy": asdict(config.policy),
+            "baseline_mode": baseline_mode,
             "actions": [],
         }
 
@@ -226,15 +260,23 @@ def compare_action_conditioned_successors(config: CompareActionConditionedSucces
                 sample_count=config.sample_count,
                 batch_size=config.sample_batch_size,
             )
-            trajectory_xy, next_xy = _deterministic_rollout_after_action(
-                env,
-                policy,
-                observation,
-                used_action,
-                device=device,
-                rollout_steps=config.rollout_steps,
-                physics_state=physics_state,
-            )
+            if baseline_mode == "dataset_episode":
+                trajectory_xy, next_xy = _dataset_trajectory_after_index(
+                    observations,
+                    ep_offset,
+                    ep_len,
+                    config.start_index,
+                )
+            else:
+                trajectory_xy, next_xy = _deterministic_rollout_after_action(
+                    env,
+                    policy,
+                    observation,
+                    used_action,
+                    device=device,
+                    rollout_steps=config.rollout_steps,
+                    physics_state=physics_state,
+                )
             rollout_positions = _sample_discounted_positions(
                 trajectory_positions=trajectory_xy,
                 gamma=gamma,
@@ -296,7 +338,10 @@ def compare_action_conditioned_successors(config: CompareActionConditionedSucces
         metadata["pairwise"] = pairwise
 
         axes[0][0].set_ylabel("model", fontsize=11)
-        axes[1][0].set_ylabel("take a once,\nthen follow pi", fontsize=11)
+        axes[1][0].set_ylabel(
+            "logged dataset\ncontinuation" if baseline_mode == "dataset_episode" else "take a once,\nthen follow pi",
+            fontsize=11,
+        )
         fig.suptitle(
             (
                 f"Fixed state index {config.start_index}\n"
