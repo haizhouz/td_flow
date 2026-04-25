@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -39,17 +40,24 @@ DEFAULT_DNC_ROOT = "/home/haizhou/Documents/DnC-FBr"
 class PointMassPolicyConditionedOccupancyConfig:
     checkpoint_path: str
     dnc_root: str = DEFAULT_DNC_ROOT
+    td_jepa_root: str = "third_party/td_jepa"
+    td3_checkpoint_model_path: str = (
+        "outputs/pointmass-loop-td3-tdjepa-paper-compile-par16-5m-20260417-132244/checkpoint/model"
+    )
     device: str = "auto"
     num_states: int = 5
     sample_count: int = 2048
     sample_batch_size: int = 1024
     rollout_steps: int = 1000
     stochastic_rollouts: int = 64
+    rollout_num_workers: int = 1
+    worker_torch_threads: int = 1
     rollout_max_noise_fraction: float = 0.1
     seed: int = 0
     output_path: str | None = None
     use_dataset_initial_action: bool = False
     baseline_mode: str = "auto"
+    policy_source: str = "scripted"
     compile_policy: bool = False
     policy: PointMassLoopPolicyConfig = PointMassLoopPolicyConfig()
 
@@ -82,6 +90,31 @@ def _sample_random_indices(dataset_size: int, count: int, seed: int) -> np.ndarr
         raise ValueError(f"Requested {count} states but dataset only has {dataset_size}")
     rng = np.random.default_rng(seed)
     return np.sort(rng.choice(dataset_size, size=count, replace=False).astype(np.int64))
+
+
+def _sample_valid_start_indices(
+    ep_offset: np.ndarray,
+    ep_len: np.ndarray,
+    count: int,
+    seed: int,
+) -> np.ndarray:
+    valid_counts = np.maximum(ep_len.astype(np.int64) - 1, 0)
+    total_valid = int(valid_counts.sum())
+    if total_valid <= 0:
+        raise ValueError("No valid start states found with at least one future observation.")
+    if count > total_valid:
+        raise ValueError(f"Requested {count} states but only {total_valid} valid start states are available.")
+
+    rng = np.random.default_rng(seed)
+    chosen = np.sort(rng.choice(total_valid, size=count, replace=False))
+    cumulative = np.cumsum(valid_counts, dtype=np.int64)
+    indices = np.empty(count, dtype=np.int64)
+    for i, flat_index in enumerate(chosen):
+        episode_index = int(np.searchsorted(cumulative, flat_index, side="right"))
+        previous_total = 0 if episode_index == 0 else int(cumulative[episode_index - 1])
+        local_index = int(flat_index - previous_total)
+        indices[i] = int(ep_offset[episode_index]) + local_index
+    return indices
 
 
 def _draw_maze_background(ax: plt.Axes) -> None:
@@ -179,9 +212,54 @@ def _make_torch_generator(device: torch.device, seed: int) -> torch.Generator:
     return generator
 
 
+class _TD3RolloutPolicy(torch.nn.Module):
+    def __init__(self, td3_model: torch.nn.Module) -> None:
+        super().__init__()
+        self.td3_model = td3_model
+
+    @torch.no_grad()
+    def forward(self, observation_tensor: torch.Tensor) -> torch.Tensor:
+        action_tensor = self.td3_model.act(observation_tensor, mean=True)
+        return torch.clamp(action_tensor, -1.0, 1.0)
+
+
+def _load_rollout_policy(
+    *,
+    policy_source: str,
+    policy_config: PointMassLoopPolicyConfig,
+    td_jepa_root: str,
+    td3_checkpoint_model_path: str,
+    device: torch.device,
+) -> torch.nn.Module:
+    if policy_source == "scripted":
+        return TorchPointMassLoopScriptedPolicy(policy_config).to(device)
+    if policy_source == "td3":
+        td_jepa_path = Path(td_jepa_root).resolve()
+        if str(td_jepa_path) not in sys.path:
+            sys.path.insert(0, str(td_jepa_path))
+        from metamotivo.agents.td3.model import TD3Model
+
+        td3_model = TD3Model.load(str(Path(td3_checkpoint_model_path).resolve()), device=device.type)
+        td3_model.eval()
+        return _TD3RolloutPolicy(td3_model).to(device)
+    raise ValueError("policy_source must be one of: scripted, td3")
+
+
+def _rollout_policy_label(policy_source: str) -> str:
+    if policy_source == "scripted":
+        return "scripted policy"
+    if policy_source == "td3":
+        return "TD3 policy"
+    return policy_source
+
+
+def _rollout_noise_label(max_noise_fraction: float) -> str:
+    return "noisy" if max_noise_fraction > 0.0 else "deterministic"
+
+
 @torch.no_grad()
 def _sample_policy_action_tensor(
-    policy: TorchPointMassLoopScriptedPolicy,
+    policy: torch.nn.Module,
     observation: np.ndarray,
     *,
     device: torch.device,
@@ -209,7 +287,7 @@ def _sample_stochastic_rollout_positions(
     *,
     rollout_steps: int,
     rollout_count: int,
-    policy: TorchPointMassLoopScriptedPolicy,
+    policy: torch.nn.Module,
     device: torch.device,
     initial_action: np.ndarray,
     max_noise_fraction: float,
@@ -224,7 +302,7 @@ def _sample_stochastic_rollout_positions(
     for _ in range(rollout_count):
         _set_env_state_from_observation(env, observation, physics_state)
         current_obs = np.asarray(observation, dtype=np.float32)
-        noisy_positions: list[np.ndarray] = [current_obs[:2].copy()]
+        noisy_positions: list[np.ndarray] = []
 
         if rollout_steps > 0:
             time_step = env.step(np.asarray(initial_action, dtype=np.float32))
@@ -244,6 +322,8 @@ def _sample_stochastic_rollout_positions(
             current_obs = np.asarray(time_step.observation["observations"], dtype=np.float32)
             noisy_positions.append(current_obs[:2].copy())
 
+        if not noisy_positions:
+            raise ValueError("rollout_steps must be positive to sample successor occupancy.")
         trajectory_positions = np.stack(noisy_positions, axis=0)
 
         positions_chunks.append(trajectory_positions)
@@ -257,6 +337,47 @@ def _sample_stochastic_rollout_positions(
     return all_positions[sampled_indices]
 
 
+def _sample_stochastic_rollout_positions_worker(args: dict[str, object]) -> np.ndarray:
+    torch.set_num_threads(int(args["worker_torch_threads"]))
+    device = _resolve_device(str(args["device"]))
+    policy = _load_rollout_policy(
+        policy_source=str(args["policy_source"]),
+        policy_config=PointMassLoopPolicyConfig(**args["policy"]),  # type: ignore[arg-type]
+        td_jepa_root=str(args["td_jepa_root"]),
+        td3_checkpoint_model_path=str(args["td3_checkpoint_model_path"]),
+        device=device,
+    )
+    if bool(args["compile_policy"]):
+        policy = torch.compile(policy)
+
+    pointmass = _load_pointmass_module(str(args["dnc_root"]))
+    env = pointmass.loop(
+        random=int(args["seed"]),
+        environment_kwargs=dict(flat_observation=True),
+    )
+    env.reset()
+    try:
+        return _sample_stochastic_rollout_positions(
+            env,
+            np.asarray(args["observation"], dtype=np.float32),
+            None if args["physics_state"] is None else np.asarray(args["physics_state"], dtype=np.float64),
+            rollout_steps=int(args["rollout_steps"]),
+            rollout_count=int(args["stochastic_rollouts"]),
+            policy=policy,
+            device=device,
+            initial_action=np.asarray(args["initial_action"], dtype=np.float32),
+            max_noise_fraction=float(args["rollout_max_noise_fraction"]),
+            gamma=float(args["gamma"]),
+            sample_count=int(args["sample_count"]),
+            seed=int(args["seed"]),
+        )
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+
+
 def _sample_discounted_positions(
     trajectory_positions: np.ndarray,
     *,
@@ -264,6 +385,8 @@ def _sample_discounted_positions(
     sample_count: int,
     seed: int,
 ) -> np.ndarray:
+    if len(trajectory_positions) == 0:
+        raise ValueError("trajectory_positions must contain at least one future state.")
     discounts = np.power(gamma, np.arange(len(trajectory_positions), dtype=np.float64))
     probabilities = discounts / discounts.sum()
     rng = np.random.default_rng(seed)
@@ -284,13 +407,15 @@ def _dataset_future_positions(
     episode_index = _episode_index_for_step(ep_offset, start_index)
     episode_start = int(ep_offset[episode_index])
     local_index = int(start_index - episode_start)
-    remaining = int(ep_len[episode_index]) - local_index
-    return np.asarray(observations[start_index : start_index + remaining, :2], dtype=np.float32)
+    remaining = int(ep_len[episode_index]) - local_index - 1
+    if remaining <= 0:
+        raise ValueError(f"start_index={start_index} has no future observations available.")
+    return np.asarray(observations[start_index + 1 : start_index + 1 + remaining, :2], dtype=np.float32)
 
 
 def _resolve_baseline_mode(project_config, requested_mode: str) -> str:
     if requested_mode == "auto":
-        if project_config.data.next_action_key == project_config.data.action_key:
+        if project_config.data.next_action_key is None or project_config.data.next_action_key == project_config.data.action_key:
             return "dataset_episode"
         return "scripted_policy"
     if requested_mode not in {"scripted_policy", "dataset_episode"}:
@@ -350,16 +475,18 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
     gamma = float(project_config.model.gamma)
     device = _resolve_device(config.device)
     model = load_td2_model(config.checkpoint_path, project_config, device=device)
-    policy = TorchPointMassLoopScriptedPolicy(config.policy).to(device)
+    policy = _load_rollout_policy(
+        policy_source=config.policy_source,
+        policy_config=config.policy,
+        td_jepa_root=config.td_jepa_root,
+        td3_checkpoint_model_path=config.td3_checkpoint_model_path,
+        device=device,
+    )
     if config.compile_policy:
         policy = torch.compile(policy)
 
     output_path = Path(config.output_path) if config.output_path is not None else _default_output_path(config.checkpoint_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    pointmass = _load_pointmass_module(config.dnc_root)
-    env = pointmass.loop(random=config.seed, environment_kwargs=dict(flat_observation=True))
-    env.reset()
 
     with h5py.File(dataset_path, "r") as handle:
         observations = handle[project_config.data.observation_key]
@@ -367,7 +494,7 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
         ep_offset = np.asarray(handle["ep_offset"], dtype=np.int64)
         ep_len = np.asarray(handle["ep_len"], dtype=np.int64)
         physics_states = handle["physics"] if "physics" in handle else None
-        start_indices = _sample_random_indices(len(observations), config.num_states, config.seed)
+        start_indices = _sample_valid_start_indices(ep_offset, ep_len, config.num_states, config.seed)
         baseline_mode = _resolve_baseline_mode(project_config, config.baseline_mode)
 
         fig, axes = plt.subplots(
@@ -377,14 +504,15 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
             squeeze=False,
         )
 
+        rollout_noise_label = _rollout_noise_label(config.rollout_max_noise_fraction)
         metadata: dict[str, object] = {
             "checkpoint_path": str(Path(config.checkpoint_path).resolve()),
             "dataset_path": str(dataset_path.resolve()),
             "gamma": gamma,
             "conditioning": "dataset_action_then_dataset_episode" if baseline_mode == "dataset_episode" else (
-                "dataset_initial_action_then_noisy_policy_rollout"
+                f"dataset_initial_action_then_{rollout_noise_label}_rollout_policy"
                 if config.use_dataset_initial_action
-                else "shared_noisy_initial_action_then_noisy_policy_rollout"
+                else f"shared_{rollout_noise_label}_policy_initial_action_then_{rollout_noise_label}_rollout_policy"
             ),
             "baseline_mode": baseline_mode,
             "num_states": config.num_states,
@@ -392,14 +520,32 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
             "sample_batch_size": config.sample_batch_size,
             "rollout_steps": config.rollout_steps,
             "stochastic_rollouts": config.stochastic_rollouts,
+            "rollout_num_workers": config.rollout_num_workers,
+            "worker_torch_threads": config.worker_torch_threads,
             "rollout_max_noise_fraction": config.rollout_max_noise_fraction,
             "seed": config.seed,
             "device": str(device),
             "compile_policy": config.compile_policy,
+            "policy_source": config.policy_source,
+            "td3_checkpoint_model_path": str(Path(config.td3_checkpoint_model_path).resolve()),
             "policy": asdict(config.policy),
             "start_indices": start_indices.tolist(),
             "states": [],
         }
+
+        rollout_worker_count = (
+            max(1, min(int(config.rollout_num_workers), int(config.num_states)))
+            if baseline_mode != "dataset_episode"
+            else 1
+        )
+        env = None
+        if baseline_mode != "dataset_episode" and rollout_worker_count <= 1:
+            pointmass = _load_pointmass_module(config.dnc_root)
+            env = pointmass.loop(random=config.seed, environment_kwargs=dict(flat_observation=True))
+            env.reset()
+
+        state_records: list[dict[str, object]] = []
+        rollout_worker_args: list[dict[str, object]] = []
 
         for column, start_index in enumerate(start_indices.tolist()):
             observation = np.asarray(observations[start_index], dtype=np.float32)
@@ -426,6 +572,13 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
                 sample_count=config.sample_count,
                 batch_size=config.sample_batch_size,
             )
+            record: dict[str, object] = {
+                "start_index": int(start_index),
+                "observation": observation,
+                "model_positions": model_positions,
+                "conditioning_action": action,
+                "rollout_positions": None,
+            }
             if baseline_mode == "dataset_episode":
                 trajectory_positions = _dataset_future_positions(
                     observations,
@@ -439,7 +592,31 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
                     sample_count=config.sample_count,
                     seed=config.seed + column,
                 )
+                record["rollout_positions"] = rollout_positions
+            elif rollout_worker_count > 1:
+                rollout_worker_args.append(
+                    {
+                        "dnc_root": config.dnc_root,
+                        "td_jepa_root": config.td_jepa_root,
+                        "td3_checkpoint_model_path": config.td3_checkpoint_model_path,
+                        "device": str(device),
+                        "policy_source": config.policy_source,
+                        "compile_policy": config.compile_policy,
+                        "policy": asdict(config.policy),
+                        "observation": observation,
+                        "physics_state": physics_state,
+                        "initial_action": action,
+                        "rollout_steps": config.rollout_steps,
+                        "stochastic_rollouts": config.stochastic_rollouts,
+                        "rollout_max_noise_fraction": config.rollout_max_noise_fraction,
+                        "gamma": gamma,
+                        "sample_count": config.sample_count,
+                        "seed": config.seed + column,
+                        "worker_torch_threads": config.worker_torch_threads,
+                    }
+                )
             else:
+                assert env is not None
                 rollout_positions = _sample_stochastic_rollout_positions(
                     env,
                     observation,
@@ -454,6 +631,29 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
                     sample_count=config.sample_count,
                     seed=config.seed + column,
                 )
+                record["rollout_positions"] = rollout_positions
+
+            state_records.append(record)
+
+        if rollout_worker_args:
+            with ProcessPoolExecutor(max_workers=rollout_worker_count) as executor:
+                for record, rollout_positions in zip(
+                    state_records,
+                    executor.map(_sample_stochastic_rollout_positions_worker, rollout_worker_args),
+                ):
+                    record["rollout_positions"] = rollout_positions
+
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        for column, record in enumerate(state_records):
+            observation = np.asarray(record["observation"], dtype=np.float32)
+            model_positions = np.asarray(record["model_positions"], dtype=np.float32)
+            rollout_positions = np.asarray(record["rollout_positions"], dtype=np.float32)
+            action = np.asarray(record["conditioning_action"], dtype=np.float32)
 
             _plot_occupancy_cell(axes[0][column], model_positions, observation[:2])
             axes[0][column].set_title(
@@ -468,7 +668,7 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
 
             metadata["states"].append(
                 {
-                    "start_index": int(start_index),
+                    "start_index": int(record["start_index"]),
                     "observation": observation.tolist(),
                     "conditioning_action": action.tolist(),
                 }
@@ -479,9 +679,9 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
             "Logged dataset\nepisode continuation"
             if baseline_mode == "dataset_episode"
             else (
-                "Logged-a then noisy\npolicy rollout"
+                f"Logged-a then {rollout_noise_label}\npolicy rollout"
                 if config.use_dataset_initial_action
-                else "Shared-a noisy policy\nrollout"
+                else f"Shared-a {rollout_noise_label} policy\nrollout"
             ),
             fontsize=11,
         )
@@ -490,9 +690,9 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
                 f"PointMass Policy-Conditioned Samples vs Logged Dataset Continuation (gamma={gamma:.2f})"
                 if baseline_mode == "dataset_episode"
                 else (
-                    f"PointMass Policy-Conditioned Samples vs Logged-a Then Noisy Rollout (gamma={gamma:.2f})"
+                    f"PointMass Policy-Conditioned Samples vs Logged-a Then {rollout_noise_label.title()} {_rollout_policy_label(config.policy_source)} Rollout (gamma={gamma:.2f})"
                     if config.use_dataset_initial_action
-                    else f"PointMass Policy-Conditioned Samples vs Shared-a Noisy Rollout (gamma={gamma:.2f})"
+                    else f"PointMass Policy-Conditioned Samples vs Shared-a {rollout_noise_label.title()} {_rollout_policy_label(config.policy_source)} Rollout (gamma={gamma:.2f})"
                 )
             ),
             fontsize=14,
@@ -504,17 +704,13 @@ def plot_pointmass_policy_conditioned_occupancy(config: PointMassPolicyCondition
 
     metadata_path = _default_metadata_path(output_path)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-    try:
-        env.close()
-    except Exception:
-        pass
     return output_path
 
 
 def main() -> None:
     config = tyro.cli(
         PointMassPolicyConditionedOccupancyConfig,
-        description="Plot scripted-policy-conditioned pointmass occupancies from a trained TD-Flow checkpoint.",
+        description="Plot rollout-policy-conditioned pointmass occupancies from a trained TD-Flow checkpoint.",
     )
     output_path = plot_pointmass_policy_conditioned_occupancy(config)
     print(str(output_path))

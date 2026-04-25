@@ -1,0 +1,101 @@
+{
+  "baseline_mode": "scripted_policy",
+  "checkpoint_path": "outputs/pointmass-exorl-td3policy-offpolicy-paper-authorfix-iid-odepath-3m-20260421-134835-855197/checkpoints/last.ckpt",
+  "compile_policy": false,
+  "conditioning": "shared_deterministic_policy_initial_action_then_deterministic_rollout_policy",
+  "dataset_path": "data/stablewm_cache/pointmass-exorl-rnd-td3-policy.h5",
+  "device": "cpu",
+  "gamma": 0.99,
+  "num_states": 5,
+  "policy": {
+    "action_limit": 1.0,
+    "diamond_radius": 0.24,
+    "radial_gain": 1.0,
+    "target_speed": 0.1,
+    "velocity_gain": 20.0
+  },
+  "policy_source": "td3",
+  "rollout_max_noise_fraction": 0.0,
+  "rollout_num_workers": 5,
+  "rollout_steps": 1000,
+  "sample_batch_size": 1024,
+  "sample_count": 2048,
+  "seed": 0,
+  "start_indices": [
+    2700563,
+    3081372,
+    5116474,
+    6375983,
+    8514744
+  ],
+  "states": [
+    {
+      "conditioning_action": [
+        -1.0,
+        1.0
+      ],
+      "observation": [
+        -0.02990677021443844,
+        0.09009645879268646,
+        0.005006803665310144,
+        -0.008950368501245975
+      ],
+      "start_index": 2700563
+    },
+    {
+      "conditioning_action": [
+        0.9998292922973633,
+        -1.0
+      ],
+      "observation": [
+        0.011020288802683353,
+        0.28703492879867554,
+        0.05227204039692879,
+        -0.011532249860465527
+      ],
+      "start_index": 3081372
+    },
+    {
+      "conditioning_action": [
+        1.0,
+        -1.0
+      ],
+      "observation": [
+        -0.18982653319835663,
+        0.14686280488967896,
+        -0.0555044487118721,
+        -0.09414632618427277
+      ],
+      "start_index": 5116474
+    },
+    {
+      "conditioning_action": [
+        1.0,
+        -1.0
+      ],
+      "observation": [
+        -0.26207128167152405,
+        0.27885183691978455,
+        0.077543705701828,
+        0.02832256443798542
+      ],
+      "start_index": 6375983
+    },
+    {
+      "conditioning_action": [
+        1.0,
+        -1.0
+      ],
+      "observation": [
+        -0.25987765192985535,
+        0.12552550435066223,
+        0.07945721596479416,
+        -0.012677362188696861
+      ],
+      "start_index": 8514744
+    }
+  ],
+  "stochastic_rollouts": 64,
+  "td3_checkpoint_model_path": "outputs/pointmass-loop-td3-tdjepa-paper-compile-par16-5m-20260417-132244/checkpoint/model",
+  "worker_torch_threads": 1
+}

@@ -10,6 +10,8 @@ import torch
 
 from td_flow.pointmass.plot_policy_conditioned_occupancy import (
     _dataset_action_tensor,
+    _dataset_future_positions,
+    _resolve_baseline_mode,
     _sample_stochastic_rollout_positions,
     _set_env_state_from_observation,
 )
@@ -113,6 +115,47 @@ class PlotPointMassPolicyConditionedOccupancyTests(unittest.TestCase):
                 action_tensor = _dataset_action_tensor(handle["action"], 1, device=torch.device("cpu"))
 
         np.testing.assert_allclose(action_tensor.numpy(), np.array([[0.7, 0.3]], dtype=np.float32))
+
+    def test_dataset_future_positions_excludes_current_state(self) -> None:
+        observations = np.array(
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
+        future_positions = _dataset_future_positions(
+            observations,
+            ep_offset=np.array([0], dtype=np.int64),
+            ep_len=np.array([4], dtype=np.int64),
+            start_index=1,
+        )
+
+        np.testing.assert_allclose(
+            future_positions,
+            np.array([[2.0, 0.0], [3.0, 0.0]], dtype=np.float32),
+        )
+
+    def test_auto_baseline_treats_missing_next_action_key_as_dataset_episode(self) -> None:
+        project_config = type(
+            "ProjectConfig",
+            (),
+            {
+                "data": type(
+                    "DataConfig",
+                    (),
+                    {
+                        "action_key": "action",
+                        "next_action_key": None,
+                    },
+                )()
+            },
+        )()
+
+        self.assertEqual(_resolve_baseline_mode(project_config, "auto"), "dataset_episode")
 
 
 if __name__ == "__main__":
